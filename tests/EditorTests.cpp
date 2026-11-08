@@ -56,7 +56,7 @@ TEST("Editor.CrossBitness")
 {
     for (const auto& architecture : {std::string("x86"), std::string("x64")})
     {
-        auto folder = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build" / architecture / "Debug";
+        auto folder = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build" / architecture / NYTERA_TEST_CONFIG;
         auto source = folder / "NyteraFixture.dll";
         Manifest manifest;
         manifest.sourceHash = sha256(readFile(source));

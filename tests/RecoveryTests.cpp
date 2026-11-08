@@ -13,7 +13,7 @@ struct RecoverySession
     std::filesystem::path source, helper;
     RecoverySession()
     {
-        auto folder = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build/x64/Debug";
+        auto folder = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build/x64/" NYTERA_TEST_CONFIG;
         source = folder / "NyteraStateFixture.dll"; helper = folder / "NyteraBridge.exe";
         auto native = require(Vst2Instance::open(source)); manifest = require(native->inspect());
         require(client.start(manifest, helper, source));

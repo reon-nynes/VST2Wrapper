@@ -6,11 +6,13 @@
 #include <pluginterfaces/vst/ivsteditcontroller.h>
 #include <pluginterfaces/vst/ivstmessage.h>
 #include <pluginterfaces/gui/iplugview.h>
+#include <pluginterfaces/gui/iplugviewcontentscalesupport.h>
 #include <thread>
 #include <pluginterfaces/vst/ivstprocesscontext.h>
 #include <pluginterfaces/vst/ivstparameterchanges.h>
 #include <cmath>
 #include "common/BoundedQueue.h"
+namespace Steinberg { DEF_CLASS_IID(IPlugViewContentScaleSupport) }
 using namespace nytera;
 struct StateOutputChanges : Steinberg::Vst::IParameterChanges
 {
@@ -29,7 +31,7 @@ struct ParameterSession
     {
         auto instance = require(Vst2Instance::open(NYTERA_FIXTURE));
         auto manifest = require(instance->inspect());
-        auto helper = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build/x64/Debug/NyteraBridge.exe";
+        auto helper = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build/x64/" NYTERA_TEST_CONFIG "/NyteraBridge.exe";
         require(client.start(manifest, helper, NYTERA_FIXTURE));
     }
 };
@@ -98,6 +100,33 @@ TEST("Parameter.Gestures")
     CHECK(events.size() == 3);
     CHECK(events[0].opcode == 43 && events[1].opcode == 0 && events[2].opcode == 44);
     CHECK(events[1].index == 0 && events[1].normalized == 0.75f);
+    session.client.closeEditor();
+}
+TEST("Parameter.StaleEditor")
+{
+    ParameterSession session;
+    require(session.client.prepare({48000, 64, 2, 2, true}));
+    ParameterEditor editor(session.client);
+    session.client.enqueueParameter({0, 0, 0.8f, 1});
+    SendMessageW(editor.original, WM_COMMAND, 113, 0);
+    auto events = require(session.client.takeNotifications());
+    CHECK(std::none_of(events.begin(), events.end(), [](const auto& event) { return event.opcode == 0; }));
+    CHECK(require(session.client.parameterValues())[0] == 0.8f);
+    require(session.client.flushParameters());
+    CHECK(require(session.client.parameterValues())[0] == 0.8f);
+    session.client.closeEditor();
+}
+TEST("Parameter.EditorPreservesValues")
+{
+    ParameterSession session;
+    ParameterEditor editor(session.client);
+    SendMessageW(editor.original, WM_COMMAND, 114, 0);
+    session.client.closeEditor();
+    session.client.enqueueParameter({0, 0, 0.8f, 1}); require(session.client.flushParameters());
+    require(session.client.openEditor(reinterpret_cast<uint64_t>(editor.parent)));
+    CHECK(require(session.client.parameterValues())[0] == 0.8f);
+    auto events = require(session.client.takeNotifications());
+    CHECK(std::none_of(events.begin(), events.end(), [](const auto& event) { return event.opcode == 0; }));
     session.client.closeEditor();
 }
 TEST("Parameter.TopologyChange")
@@ -254,7 +283,7 @@ static void parameterThroughVst3(bool captureDuringEdit)
     std::filesystem::create_directories(folder);
     auto instance = require(Vst2Instance::open(NYTERA_FIXTURE));
     auto manifest = require(instance->inspect());
-    auto helper = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build/x64/Debug/NyteraBridge.exe";
+    auto helper = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build/x64/" NYTERA_TEST_CONFIG "/NyteraBridge.exe";
     auto path = folder / "Parameter.vst3";
     require(writePackage({manifest, NYTERA_EFFECT_TEMPLATE, helper, NYTERA_FIXTURE, {}}, path));
     ParameterPlugin plugin(path);
@@ -294,11 +323,11 @@ static void stateThroughVst3(bool programs)
     auto root = std::filesystem::path(NYTERA_SOURCE_ROOT);
     auto folder = root / "out/state-vst3-tests" / std::to_string(GetCurrentProcessId());
     std::filesystem::create_directories(folder);
-    auto source = root / "out/build/x64/Debug" / (programs ? "NyteraProgramFixture.dll" : "NyteraStateFixture.dll");
+    auto source = root / "out/build/x64/" NYTERA_TEST_CONFIG / (programs ? "NyteraProgramFixture.dll" : "NyteraStateFixture.dll");
     auto instance = require(Vst2Instance::open(source));
     auto manifest = require(instance->inspect());
     auto path = folder / "State.vst3";
-    require(writePackage({manifest, NYTERA_EFFECT_TEMPLATE, root / "out/build/x64/Debug/NyteraBridge.exe", source, {}}, path));
+    require(writePackage({manifest, NYTERA_EFFECT_TEMPLATE, root / "out/build/x64/" NYTERA_TEST_CONFIG "/NyteraBridge.exe", source, {}}, path));
     ParameterPlugin first(path);
     auto id = manifest.parameters[0].vst3Id;
     ParamID programId = 0;
@@ -382,3 +411,46 @@ static void stateThroughVst3(bool programs)
 }
 TEST("State.Vst3Entry") { stateThroughVst3(false); }
 TEST("State.Vst3Programs") { stateThroughVst3(true); }
+TEST("Editor.ContentScale")
+{
+    auto root = std::filesystem::path(NYTERA_SOURCE_ROOT);
+    auto folder = root / "out/scale-tests" / std::to_string(GetCurrentProcessId());
+    std::filesystem::create_directories(folder);
+    auto source = std::filesystem::path(NYTERA_FIXTURE);
+    auto native = require(Vst2Instance::open(source)); auto manifest = require(native->inspect());
+    auto path = folder / "Scale.vst3";
+    require(writePackage({manifest, NYTERA_EFFECT_TEMPLATE, root / "out/build/x64/" NYTERA_TEST_CONFIG "/NyteraBridge.exe", source, {}}, path));
+    ParameterPlugin plugin(path); plugin.openEditor();
+    struct Frame : IPlugFrame
+    {
+        ParameterPlugin& plugin;
+        explicit Frame(ParameterPlugin& plugin) : plugin(plugin) { plugin.view->setFrame(this); }
+        ~Frame() { plugin.view->setFrame(nullptr); }
+        tresult PLUGIN_API queryInterface(const TUID, void**) override { return kNoInterface; }
+        uint32 PLUGIN_API addRef() override { return 1; }
+        uint32 PLUGIN_API release() override { return 1; }
+        tresult PLUGIN_API resizeView(IPlugView* view, ViewRect* size) override
+        {
+            SetWindowPos(plugin.window, nullptr, 0, 0, size->getWidth(), size->getHeight(), SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            return view->onSize(size);
+        }
+    } frame(plugin);
+    HWND original = nullptr;
+    EnumChildWindows(plugin.window, [](HWND window, LPARAM result) -> BOOL
+    {
+        wchar_t type[128] {}; GetClassNameW(window, type, 128);
+        if (std::wstring(type) == L"NyteraFixtureEditor") *reinterpret_cast<HWND*>(result) = window;
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&original));
+    CHECK(original);
+    IPlugViewContentScaleSupport* raw = nullptr;
+    CHECK(plugin.view->queryInterface(IPlugViewContentScaleSupport::iid, reinterpret_cast<void**>(&raw)) == kResultOk);
+    auto release = [](IPlugViewContentScaleSupport* support) { support->release(); };
+    std::unique_ptr<IPlugViewContentScaleSupport, decltype(release)> support(raw, release);
+    for (float factor : {1.0f, 1.5f, 2.0f, 1.0f})
+    {
+        CHECK(support->setContentScaleFactor(factor) == kResultOk); pumpMessages();
+        RECT editor {}, parent {}; GetWindowRect(original, &editor); GetWindowRect(plugin.window, &parent);
+        CHECK(editor.left >= parent.left && editor.top >= parent.top && editor.right <= parent.right + 1 && editor.bottom <= parent.bottom + 1);
+    }
+}

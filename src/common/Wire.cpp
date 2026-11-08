@@ -11,7 +11,7 @@ Bytes encodeFrame(const Frame& frame)
     if (frame.payload.size() > payloadLimit(frame.command)) throw std::runtime_error("Control payload too large");
     Writer writer;
     writer.number<uint32_t>(0x3142594e);
-    writer.number<uint32_t>(2);
+    writer.number<uint32_t>(3);
     writer.number(static_cast<uint32_t>(frame.command));
     writer.number(frame.requestId);
     writer.number(static_cast<uint32_t>(frame.payload.size()));
@@ -24,7 +24,7 @@ Result<uint32_t> framePayloadSize(std::span<const std::byte> data)
     try
     {
         Reader reader(data);
-        if (reader.number<uint32_t>() != 0x3142594e || reader.number<uint32_t>() != 2)
+        if (reader.number<uint32_t>() != 0x3142594e || reader.number<uint32_t>() != 3)
             throw std::runtime_error("Incompatible bridge protocol");
         auto command = static_cast<ControlCommand>(reader.number<uint32_t>());
         if (command < ControlCommand::hello || command > ControlCommand::programs)

@@ -107,6 +107,12 @@ struct BridgeClient::Impl
     std::vector<ParameterEvent> parameterScratch;
     std::atomic<bool> parameterOverflow {false};
     uint32_t parameterCount = 0;
+    struct HostParameter
+    {
+        std::atomic<float> value {0};
+        std::atomic<uint64_t> sequence {0};
+    };
+    std::unique_ptr<HostParameter[]> hostParameters = std::make_unique<HostParameter[]>(65536);
     std::atomic<uint64_t> parameterSequence {0};
     void collectParameters(EventBlockView& events)
     {
@@ -346,6 +352,8 @@ Result<std::vector<HostNotification>> BridgeClient::takeNotifications()
         for (uint32_t i = 0; i < count; ++i)
         {
             HostNotification event {reader.number<uint32_t>(), reader.number<int32_t>(), reader.number<int64_t>(), reader.real32()};
+            if (event.opcode == 0 && event.index >= 0 && static_cast<uint32_t>(event.index) < impl->parameterCount
+                && (event.value < 0 || static_cast<uint64_t>(event.value) < impl->hostParameters[event.index].sequence.load())) continue;
             if (event.opcode == 15 && event.index > 0 && event.value > 0)
             { impl->editorWidth = static_cast<uint32_t>(event.index); impl->editorHeight = static_cast<uint32_t>(event.value); }
             if (event.opcode == 13 && event.value >= 0 && event.value <= INT32_MAX)
@@ -443,6 +451,11 @@ void BridgeClient::enqueueParameter(const ParameterEvent& event) noexcept
 {
     auto ordered = event;
     ordered.sequence = ++impl->parameterSequence;
+    if (ordered.origin == 1 && ordered.index < 65536)
+    {
+        impl->hostParameters[ordered.index].value = ordered.normalized;
+        impl->hostParameters[ordered.index].sequence = ordered.sequence;
+    }
     if (!impl->parameterQueue->push(ordered)) impl->parameterOverflow = true;
 }
 Result<ParameterDisplay> BridgeClient::parameterDisplay(uint32_t index)
@@ -464,7 +477,12 @@ Result<std::vector<float>> BridgeClient::parameterValues()
         Reader reader(std::get<Bytes>(reply));
         auto count = reader.count(65536);
         std::vector<float> values;
-        for (uint32_t i = 0; i < count; ++i) values.push_back(reader.real32());
+        for (uint32_t i = 0; i < count; ++i)
+        {
+            auto value = reader.real32(); auto sequence = reader.number<uint64_t>();
+            const auto& pending = impl->hostParameters[i];
+            values.push_back(sequence < pending.sequence.load() ? pending.value.load() : value);
+        }
         reader.finish();
         return values;
     }

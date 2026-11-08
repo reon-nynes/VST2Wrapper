@@ -1,3 +1,72 @@
+diff --git a/modules/juce_audio_basics/midi/juce_MidiBuffer.cpp b/modules/juce_audio_basics/midi/juce_MidiBuffer.cpp
+index b089840..ec89d3a 100644
+--- a/modules/juce_audio_basics/midi/juce_MidiBuffer.cpp
++++ b/modules/juce_audio_basics/midi/juce_MidiBuffer.cpp
+@@ -42,14 +42,14 @@ namespace MidiBufferHelpers
+         return readUnaligned<int32> (d);
+     }
+ 
+-    inline uint16 getEventDataSize (const void* d) noexcept
++    inline uint32 getEventDataSize (const void* d) noexcept
+     {
+-        return readUnaligned<uint16> (static_cast<const char*> (d) + sizeof (int32));
++        return readUnaligned<uint32> (static_cast<const char*> (d) + sizeof (int32));
+     }
+ 
+-    inline uint16 getEventTotalSize (const void* d) noexcept
++    inline uint32 getEventTotalSize (const void* d) noexcept
+     {
+-        return (uint16) (getEventDataSize (d) + sizeof (int32) + sizeof (uint16));
++        return (uint32) (getEventDataSize (d) + sizeof (int32) + sizeof (uint32));
+     }
+ 
+     static int findActualEventLength (const uint8* data, int maxBytes) noexcept
+@@ -94,7 +94,7 @@ namespace MidiBufferHelpers
+ //==============================================================================
+ MidiBufferIterator& MidiBufferIterator::operator++() noexcept
+ {
+-    data += sizeof (int32) + sizeof (uint16) + size_t (MidiBufferHelpers::getEventDataSize (data));
++    data += sizeof (int32) + sizeof (uint32) + size_t (MidiBufferHelpers::getEventDataSize (data));
+     return *this;
+ }
+ 
+@@ -107,8 +107,8 @@ MidiBufferIterator MidiBufferIterator::operator++ (int) noexcept
+ 
+ MidiBufferIterator::reference MidiBufferIterator::operator*() const noexcept
+ {
+-    return { data + sizeof (int32) + sizeof (uint16),
+-             MidiBufferHelpers::getEventDataSize (data),
++    return { data + sizeof (int32) + sizeof (uint32),
++             static_cast<int> (MidiBufferHelpers::getEventDataSize (data)),
+              MidiBufferHelpers::getEventTime (data) };
+ }
+ 
+@@ -143,13 +143,7 @@ bool MidiBuffer::addEvent (const void* newData, int maxBytes, int sampleNumber)
+     if (numBytes <= 0)
+         return true;
+ 
+-    if (std::numeric_limits<uint16>::max() < numBytes)
+-    {
+-        // This method only supports messages smaller than (1 << 16) bytes
+-        return false;
+-    }
+-
+-    auto newItemSize = (size_t) numBytes + sizeof (int32) + sizeof (uint16);
++    auto newItemSize = (size_t) numBytes + sizeof (int32) + sizeof (uint32);
+     auto offset = (int) (MidiBufferHelpers::findEventAfter (data.begin(), data.end(), sampleNumber) - data.begin());
+ 
+     data.insertMultiple (offset, 0, (int) newItemSize);
+@@ -157,8 +151,8 @@ bool MidiBuffer::addEvent (const void* newData, int maxBytes, int sampleNumber)
+     auto* d = data.begin() + offset;
+     writeUnaligned<int32>  (d, sampleNumber);
+     d += sizeof (int32);
+-    writeUnaligned<uint16> (d, static_cast<uint16> (numBytes));
+-    d += sizeof (uint16);
++    writeUnaligned<uint32> (d, static_cast<uint32> (numBytes));
++    d += sizeof (uint32);
+     memcpy (d, newData, (size_t) numBytes);
+ 
+     return true;
 diff --git a/modules/juce_audio_plugin_client/VST3/juce_VST3ModuleInfo.h b/modules/juce_audio_plugin_client/VST3/juce_VST3ModuleInfo.h
 index 231a9f4..b6e5102 100644
 --- a/modules/juce_audio_plugin_client/VST3/juce_VST3ModuleInfo.h
@@ -53,7 +122,7 @@ index 231a9f4..b6e5102 100644
                       includeFlagsAndCategory ? JucePlugin_Vst3Category : "",
                       JucePlugin_Manufacturer,
 diff --git a/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp b/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp
-index 3c0ca06..377bc05 100644
+index 3c0ca06..83f3c4e 100644
 --- a/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp
 +++ b/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp
 @@ -736,6 +736,11 @@ private:
@@ -102,7 +171,19 @@ index 3c0ca06..377bc05 100644
             #endif
  
              audioProcessorChanged (pluginInstance, ChangeDetails().withParameterInfoChanged (true));
-@@ -2815,7 +2831,14 @@ public:
+@@ -2619,6 +2635,11 @@ public:
+         if (host.get() != hostContext)
+             host.loadFrom (hostContext);
+ 
++       #ifdef NYTERA_DYNAMIC_BINDING
++        if (auto* extensions = getPluginInstance().getVST3ClientExtensions())
++            extensions->setIHostApplication (hostContext);
++       #endif
++
+         processContext.sampleRate = processSetup.sampleRate;
+         preparePlugin (processSetup.sampleRate, (int) processSetup.maxSamplesPerBlock, CallPrepareToPlay::no);
+ 
+@@ -2815,7 +2836,14 @@ public:
          }
  
          if (size > 0)
@@ -117,7 +198,7 @@ index 3c0ca06..377bc05 100644
      }
  
      //==============================================================================
-@@ -3070,12 +3093,20 @@ public:
+@@ -3070,12 +3098,20 @@ public:
          {
             #if JucePlugin_WantsMidiInput
              if (dir == Vst::kInput)
@@ -138,7 +219,7 @@ index 3c0ca06..377bc05 100644
             #endif
          }
  
-@@ -3085,6 +3116,9 @@ public:
+@@ -3085,6 +3121,9 @@ public:
      tresult PLUGIN_API getBusInfo (Vst::MediaType type, Vst::BusDirection dir,
                                     Steinberg::int32 index, Vst::BusInfo& info) override
      {
@@ -148,3 +229,118 @@ index 3c0ca06..377bc05 100644
          if (type == Vst::kAudio)
          {
              if (index < 0 || index >= getNumAudioBuses (dir == Vst::kInput))
+@@ -3588,7 +3627,20 @@ public:
+ 
+        #if JucePlugin_WantsMidiInput
+         if (isMidiInputBusEnabled && data.inputEvents != nullptr)
+-            MidiEventList::toMidiBuffer (midiBuffer, *data.inputEvents);
++        {
++            if (! MidiEventList::toMidiBuffer (midiBuffer, *data.inputEvents))
++            {
++                for (int bus = 0; bus < data.numOutputs; ++bus)
++                    for (int channel = 0; channel < data.outputs[bus].numChannels; ++channel)
++                    {
++                        if (data.symbolicSampleSize == Vst::kSample32)
++                            FloatVectorOperations::clear (data.outputs[bus].channelBuffers32[channel], data.numSamples);
++                        else
++                            FloatVectorOperations::clear (data.outputs[bus].channelBuffers64[channel], data.numSamples);
++                    }
++                return kInvalidArgument;
++            }
++        }
+        #endif
+ 
+         if (detail::PluginUtilities::getHostType().isWavelab())
+@@ -3710,6 +3762,9 @@ private:
+             const ScopedLock sl (pluginInstance->getCallbackLock());
+ 
+             pluginInstance->setNonRealtime (data.processMode == Vst::kOffline);
++           #ifdef NYTERA_DYNAMIC_BINDING
++            nytera::moduleSetPrefetch (*pluginInstance, data.processMode == Vst::kPrefetch);
++           #endif
+ 
+            #if JUCE_DEBUG && ! JucePlugin_ProducesMidiOutput
+             const int numMidiEventsComingIn = midiBuffer.getNumEvents();
+@@ -3774,7 +3829,11 @@ private:
+         if (callPrepareToPlay == CallPrepareToPlay::yes)
+             p.prepareToPlay (sampleRate, bufferSize);
+ 
++       #if NYTERA_DYNAMIC_BINDING
++        midiBuffer.ensureSize (2 * (1024 * 1024 + 4096 * 8));
++       #else
+         midiBuffer.ensureSize (2048);
++       #endif
+         midiBuffer.clear();
+ 
+         bufferMapper.updateFromProcessor (p);
+diff --git a/modules/juce_audio_processors_headless/format_types/juce_VST3Common.h b/modules/juce_audio_processors_headless/format_types/juce_VST3Common.h
+index f6d23b6..e5f57d0 100644
+--- a/modules/juce_audio_processors_headless/format_types/juce_VST3Common.h
++++ b/modules/juce_audio_processors_headless/format_types/juce_VST3Common.h
+@@ -1176,9 +1176,12 @@ public:
+     }
+ 
+     //==============================================================================
+-    static void toMidiBuffer (MidiBuffer& result, Steinberg::Vst::IEventList& eventList)
++    static bool toMidiBuffer (MidiBuffer& result, Steinberg::Vst::IEventList& eventList)
+     {
+         const auto numEvents = eventList.getEventCount();
++       #if NYTERA_DYNAMIC_BINDING
++        if (numEvents < 0 || numEvents > 4096) return false;
++       #endif
+ 
+         for (Steinberg::int32 i = 0; i < numEvents; ++i)
+         {
+@@ -1187,9 +1190,18 @@ public:
+             if (eventList.getEvent (i, e) != Steinberg::kResultOk)
+                 continue;
+ 
++           #if NYTERA_DYNAMIC_BINDING
++            if (e.type == Steinberg::Vst::Event::kDataEvent && e.data.type == Steinberg::Vst::DataEvent::kMidiSysEx)
++            {
++                if (e.data.bytes == nullptr || e.data.size < 2 || e.data.size > 1024 * 1024) return false;
++                result.addEvent (e.data.bytes, static_cast<int> (e.data.size), e.sampleOffset);
++                continue;
++            }
++           #endif
+             if (const auto message = toMidiMessage (e))
+                 result.addEvent (*message, e.sampleOffset);
+         }
++        return true;
+     }
+ 
+     template <typename Callback>
+@@ -1247,6 +1259,19 @@ private:
+                                     StoredMidiMapping* midiMapping,
+                                     Callback&& callback)
+     {
++       #if NYTERA_DYNAMIC_BINDING
++        if (metadata.numBytes > 1 && metadata.data[0] == 0xf0)
++        {
++            Steinberg::Vst::Event event {};
++            event.type = Steinberg::Vst::Event::kDataEvent;
++            event.sampleOffset = metadata.samplePosition;
++            event.data.type = Steinberg::Vst::DataEvent::kMidiSysEx;
++            event.data.bytes = metadata.data;
++            event.data.size = static_cast<uint32> (metadata.numBytes);
++            result.addEvent (event);
++            return;
++        }
++       #endif
+         const auto msg = metadata.getMessage();
+ 
+         if (sendMappedParameter (msg, midiMapping, std::forward<Callback> (callback)))
+@@ -1274,7 +1299,12 @@ private:
+                              StoredMidiMapping* midiMapping,
+                              Callback&& callback)
+     {
+-        enum { maxNumEvents = 2048 }; // Steinberg's Host Checker states that no more than 2048 events are allowed at once
++       #if NYTERA_DYNAMIC_BINDING
++        enum { maxNumEvents = 4096 };
++       #else
++        enum { maxNumEvents = 2048 };
++       #endif
++        // // Steinberg's Host Checker states that no more than 2048 events are allowed at once
+         int numEvents = 0;
+ 
+         for (const auto metadata : midiBuffer)

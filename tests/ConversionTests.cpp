@@ -6,11 +6,11 @@ using namespace nytera;
 static RuntimeAssets conversionAssets()
 {
     auto root = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build";
-    return {root / "x86/Debug/NyteraBridge.exe", root / "x64/Debug/NyteraBridge.exe", NYTERA_EFFECT_TEMPLATE, NYTERA_INSTRUMENT_TEMPLATE};
+    return {root / "x86/" NYTERA_TEST_CONFIG "/NyteraBridge.exe", root / "x64/" NYTERA_TEST_CONFIG "/NyteraBridge.exe", NYTERA_EFFECT_TEMPLATE, NYTERA_INSTRUMENT_TEMPLATE};
 }
 static std::filesystem::path conversionSource(const char* architecture = "x64")
 {
-    return std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build" / architecture / "Debug/NyteraFixture.dll";
+    return std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build" / architecture / NYTERA_TEST_CONFIG "/NyteraFixture.dll";
 }
 static std::filesystem::path conversionOutput()
 {
@@ -49,6 +49,10 @@ TEST("Conversion.NoCompiler")
     CHECK(SetEnvironmentVariableW(L"PATH", L"C:\\Windows\\System32"));
     require(generateConversion({conversionSource("x86"), {}, conversionOutput(), {}}, conversionAssets()));
     CHECK(require(readPackageManifest(conversionOutput())).architecture == Architecture::x86);
+}
+TEST("Conversion.ConfiguredAssets")
+{
+    CHECK(std::filesystem::equivalent(conversionSource(), std::filesystem::path(NYTERA_FIXTURE)));
 }
 TEST("Conversion.CancelPreservesOutput")
 {

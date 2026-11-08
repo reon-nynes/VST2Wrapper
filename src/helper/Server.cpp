@@ -132,6 +132,7 @@ private:
                     reader.finish();
                     if (parent > UINTPTR_MAX) throw Failure{ErrorCode::invalidData, "Host window handle is out of range"};
                     editor = std::make_unique<EditorHost>(*instance);
+                    std::lock_guard lock(sourceMutex);
                     auto opened = editor->open(reinterpret_cast<HWND>(static_cast<uintptr_t>(parent)));
                     if (auto* failure = std::get_if<Failure>(&opened)) throw *failure;
                     Writer writer;
@@ -244,7 +245,11 @@ private:
                     }
                     Writer writer;
                     writer.number(static_cast<uint32_t>(actual.parameters.size()));
-                    for (uint32_t i = 0; i < actual.parameters.size(); ++i) writer.floating(instance->native()->get_parameter(instance->native(), i));
+                    for (uint32_t i = 0; i < actual.parameters.size(); ++i)
+                    {
+                        writer.floating(instance->native()->get_parameter(instance->native(), i));
+                        writer.number(instance->parameterSequence(i));
+                    }
                     response.payload = std::move(writer.bytes);
                     break;
                 }

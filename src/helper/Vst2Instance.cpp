@@ -73,6 +73,7 @@ Result<std::unique_ptr<Vst2Instance>> Vst2Instance::open(const std::filesystem::
             || effect->num_outputs < 0 || effect->num_outputs > 256 || effect->num_programs < 0 || effect->num_programs > 4096)
             return Failure{ErrorCode::invalidData, "Source topology is invalid after initialization"};
         instance->parameterSequences.resize(static_cast<size_t>(effect->num_params));
+        instance->callbackParameterSequences = std::make_unique<std::atomic<uint64_t>[]>(static_cast<size_t>(effect->num_params));
         instance->parameterValues.resize(static_cast<size_t>(effect->num_params));
         for (uint32_t i = 0; i < instance->parameterValues.size(); ++i) instance->parameterValues[i] = effect->get_parameter(effect, i);
         return instance;
@@ -110,15 +111,23 @@ Status Vst2Instance::applyParameter(const ParameterEvent& event)
     // Control-thread changes may overtake an older block in the audio pipeline.
     if (event.sequence && event.sequence <= lastSequence) return std::monostate{};
     if (event.origin == 2 && effect->get_parameter(effect, event.index) == event.normalized)
-    { lastSequence = event.sequence; parameterValues[event.index] = event.normalized; return std::monostate{}; }
+    {
+        lastSequence = event.sequence; parameterValues[event.index] = event.normalized;
+        callbackParameterSequences[event.index] = lastSequence; return std::monostate{};
+    }
     auto* previous = applyingParameter;
     applyingParameter = this;
     try { effect->set_parameter(effect, event.index, event.normalized); }
     catch (...) { applyingParameter = previous; throw; }
     applyingParameter = previous;
     lastSequence = event.sequence;
+    callbackParameterSequences[event.index] = lastSequence;
     parameterValues[event.index] = event.normalized;
     return std::monostate{};
+}
+uint64_t Vst2Instance::parameterSequence(uint32_t index) const noexcept
+{
+    return callbackParameterSequences && index < parameterSequences.size() ? callbackParameterSequences[index].load() : 0;
 }
 Result<std::string> Vst2Instance::parameterDisplay(uint32_t index)
 {
@@ -438,7 +447,7 @@ intptr_t Vst2Instance::hostCall(int32_t opcode, int32_t index, intptr_t value, v
             return 0;
         case VST_HOST_OPCODE_AUTOMATE:
             if (applyingParameter == this) return 1;
-            if (onNotification) onNotification({static_cast<uint32_t>(opcode), index, value, real});
+            if (onNotification) onNotification({static_cast<uint32_t>(opcode), index, static_cast<int64_t>(parameterSequence(static_cast<uint32_t>(index))), real});
             return 1;
         case VST_HOST_OPCODE_PARAM_START_EDIT:
         case VST_HOST_OPCODE_PARAM_STOP_EDIT:

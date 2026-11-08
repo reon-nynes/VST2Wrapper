@@ -34,6 +34,7 @@ struct Instance
     bool slowCapture = false;
     bool crashCapture = false;
     bool stallEditor = false;
+    bool resetEditor = false;
     vst_rect_t rectangle {0, 0, 160, 320};
     HWND editor = nullptr;
     struct Note { int32_t offset; uint8_t status, data1, data2; };
@@ -121,6 +122,16 @@ static LRESULT CALLBACK editorProcedure(HWND window, UINT message, WPARAM wParam
         instance->flags |= 64;
         return 0;
     }
+    if (instance && message == WM_COMMAND && LOWORD(wParam) == 113)
+    {
+        instance->host(&instance->effect, 0, 0, 0, nullptr, instance->gain.load());
+        return 0;
+    }
+    if (instance && message == WM_COMMAND && LOWORD(wParam) == 114)
+    {
+        instance->resetEditor = true;
+        return 0;
+    }
     if (instance && message == WM_PAINT)
     {
         PAINTSTRUCT paint;
@@ -206,6 +217,11 @@ static intptr_t __cdecl control(vst_effect_t* effect, int32_t opcode, int32_t in
         case VST_EFFECT_OPCODE_EDITOR_GET_RECT: *static_cast<vst_rect_t**>(pointer) = &instance.rectangle; return 1;
         case VST_EFFECT_OPCODE_EDITOR_OPEN:
             if (instance.stallEditor) Sleep(INFINITE);
+            if (instance.resetEditor)
+            {
+                instance.resetEditor = false; instance.gain = 0;
+                instance.host(effect, 0, 0, 0, nullptr, 0);
+            }
         {
             WNDCLASSW type {};
             type.lpfnWndProc = editorProcedure;
@@ -253,6 +269,13 @@ static void __cdecl process(vst_effect_t* effect, const float* const* inputs, fl
     auto& instance = *static_cast<Instance*>(effect->effect_internal);
     if (instance.flags & 32) RaiseException(0xc0000005, 0, 0, nullptr);
     if (instance.flags & 64) Sleep(INFINITE);
+    if (instance.flags & 524288)
+    {
+        LARGE_INTEGER frequency, started, now;
+        QueryPerformanceFrequency(&frequency);
+        QueryPerformanceCounter(&started);
+        do { QueryPerformanceCounter(&now); } while (now.QuadPart - started.QuadPart < frequency.QuadPart / 5000);
+    }
     if (instance.flags & 65536)
     {
         vst_event_midi_t message {};
@@ -283,6 +306,7 @@ static void __cdecl process(vst_effect_t* effect, const float* const* inputs, fl
             if (instance.flags & 1024)
                 value = time && time->sampleRate == 48000 && time->tempo == 123 && time->numerator == 7 && time->denominator == 8
                     && (time->flags & (1024 | 8192)) == (1024 | 8192) ? static_cast<float>(time->samplePosition + i) : -999.0f;
+            if (instance.flags & 524288) value = static_cast<float>(instance.host(effect, 23, 0, 0, nullptr, 0));
             outputs[channel][i] = value;
         }
         instance.delayPosition = (instance.delayPosition + 1) % 16;

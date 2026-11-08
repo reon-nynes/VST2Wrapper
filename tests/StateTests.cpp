@@ -15,8 +15,8 @@ struct StateSession
     explicit StateSession(const std::string& variant = "NyteraStateFixture.dll", bool x86 = false)
     {
         auto root = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build";
-        { auto native = require(Vst2Instance::open(root / "x64/Debug" / variant)); manifest = require(native->inspect()); }
-        auto folder = root / (x86 ? "x86/Debug" : "x64/Debug");
+        { auto native = require(Vst2Instance::open(root / "x64/" NYTERA_TEST_CONFIG / variant)); manifest = require(native->inspect()); }
+        auto folder = root / (x86 ? "x86/" NYTERA_TEST_CONFIG : "x64/" NYTERA_TEST_CONFIG);
         source = folder / variant; helper = folder / "NyteraBridge.exe";
         manifest.sourceHash = sha256(readFile(source)); manifest.architecture = x86 ? Architecture::x86 : Architecture::x64;
         manifest = assignBindingIds(manifest);
@@ -120,7 +120,7 @@ TEST("State.Truncated")
 }
 TEST("State.QueuedGeneration")
 {
-    auto fixture = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build/x64/Debug/NyteraStateFixture.dll";
+    auto fixture = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build/x64/" NYTERA_TEST_CONFIG "/NyteraStateFixture.dll";
     auto source = require(Vst2Instance::open(fixture));
     ProcessConfig config {48000, 64, 2, 2, false, 1, 1};
     require(source->prepare(config));

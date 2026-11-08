@@ -367,7 +367,7 @@ ProcessResult AudioTransport::process(AudioBlockView block, EventBlockView event
             {
                 reap(sequence);
                 outputSequence = sequence;
-                outputSlot = findOutput(sequence, memory->config.offline || (transport.processFlags & 1));
+                outputSlot = findOutput(sequence, memory->config.offline || (transport.processFlags & 5));
                 if (outputSlot == -2) return mute();
                 if (outputSlot < 0) { InterlockedIncrement(&memory->header().underruns); underrun = true; }
             }

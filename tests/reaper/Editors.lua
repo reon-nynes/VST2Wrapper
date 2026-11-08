@@ -1,7 +1,7 @@
 local profile = reaper.GetResourcePath():gsub('\\', '/')
 local output = assert(io.open(profile .. '/editors-result.txt', 'w'))
 local function log(value) output:write(value, '\n'); output:flush() end
-local queue = {'Decapitator', 'VPRE-73'}
+local queue = {'Decapitator', 'Little AlterBoy', 'D82 Sonic Maximizer', 'VPRE-73'}
 local track
 local stage = 1
 local deadline = 0
@@ -9,6 +9,7 @@ local currentFx = -1
 local function advance()
   local ok, error = xpcall(function()
     if stage == 1 then
+      reaper.Main_openProject('noprompt:' .. profile .. '/empty-audio.rpp')
       reaper.InsertTrackAtIndex(0, true)
       track = assert(reaper.GetTrack(0, 0))
       log('REAPER ' .. reaper.GetAppVersion())

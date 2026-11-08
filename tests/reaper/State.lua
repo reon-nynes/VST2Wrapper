@@ -1,6 +1,7 @@
 local profile = reaper.GetResourcePath():gsub('\\', '/')
 local output = assert(io.open(profile .. '/state-result.txt', 'w'))
 local function log(value) output:write(value, '\n') output:flush() end
+local function hostTurn() coroutine.yield(reaper.time_precise() + 0.12) end
 local function verify(track, expected)
   assert(reaper.TrackFX_GetCount(track) == #expected, 'Instance count changed')
   for index, value in ipairs(expected) do
@@ -40,18 +41,23 @@ local function run()
     verify(track, {0.25, 0.75})
     log('PASS ' .. kind .. ' two closed-editor instances saved and reopened')
     reaper.TrackFX_CopyToTrack(track, 0, track, 2, false)
+    hostTurn()
     verify(track, {0.25, 0.75, 0.25})
     reaper.Undo_BeginBlock()
     assert(reaper.TrackFX_SetParamNormalized(track, 2, 0, 0.125))
     reaper.Undo_EndBlock('Nytera state verification', 2)
+    hostTurn()
     verify(track, {0.25, 0.75, 0.125})
     reaper.Undo_DoUndo2(0)
+    hostTurn()
     track = assert(reaper.GetTrack(0, 0))
     verify(track, {0.25, 0.75, 0.25})
     reaper.Undo_DoRedo2(0)
+    hostTurn()
     track = assert(reaper.GetTrack(0, 0))
     verify(track, {0.25, 0.75, 0.125})
     reaper.Undo_DoUndo2(0)
+    hostTurn()
     track = assert(reaper.GetTrack(0, 0))
     verify(track, {0.25, 0.75, 0.25})
     log('PASS ' .. kind .. ' duplicate and undo/redo')
@@ -79,14 +85,17 @@ local function run()
     log('PASS ' .. kind .. ' restored DSP with editors closed')
   end
   checkKind('Chunk')
-  reaper.defer(function()
-    local ok, error = xpcall(function() checkKind('Program') log('PASS state project recall') end, debug.traceback)
-    if not ok then log('FAIL ' .. error) end
-    output:close()
-  end)
+  hostTurn()
+  checkKind('Program') log('PASS state project recall')
 end
-reaper.defer(function()
-  local ok, error = xpcall(run, debug.traceback)
-  if not ok then log('FAIL ' .. error) end
-  if not ok then output:close() end
-end)
+local execution = coroutine.create(run)
+local resumeAt = 0
+local function tick()
+  if reaper.time_precise() < resumeAt then reaper.defer(tick) return end
+  local ok, result = coroutine.resume(execution)
+  if not ok then log('FAIL ' .. tostring(result) .. '\n' .. debug.traceback(execution)) output:close() return end
+  if coroutine.status(execution) == 'dead' then output:close() return end
+  resumeAt = result or 0
+  reaper.defer(tick)
+end
+reaper.defer(tick)

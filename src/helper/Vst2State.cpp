@@ -4,6 +4,29 @@
 #include <cstring>
 namespace nytera
 {
+Status Vst2Instance::openEditor(void* parent)
+{
+    std::vector<float> values;
+    for (uint32_t index = 0; index < parameterValues.size(); ++index) values.push_back(effect->get_parameter(effect, index));
+    auto program = dispatch(VST_EFFECT_OPCODE_PROGRAM_GET);
+    auto* previous = applyingParameter; applyingParameter = this;
+    try
+    {
+        dispatch(VST_EFFECT_OPCODE_EDITOR_OPEN, 0, 0, parent);
+        dispatch(VST_EFFECT_OPCODE_EDITOR_KEEP_ALIVE);
+        MSG message;
+        while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&message); DispatchMessageW(&message); }
+        if (effect->num_params != static_cast<int32_t>(values.size())) throw std::runtime_error("Editor initialization changed source parameter topology");
+        if (effect->num_programs > 0 && dispatch(VST_EFFECT_OPCODE_PROGRAM_GET) != program)
+        {
+            dispatch(VST_EFFECT_OPCODE_PROGRAM_SET_BEGIN); dispatch(VST_EFFECT_OPCODE_PROGRAM_SET, 0, program); dispatch(VST_EFFECT_OPCODE_PROGRAM_SET_END);
+        }
+        for (uint32_t index = 0; index < values.size(); ++index)
+            if (effect->get_parameter(effect, index) != values[index]) effect->set_parameter(effect, index, values[index]);
+    }
+    catch (const std::exception& error) { applyingParameter = previous; return Failure{ErrorCode::plugin, error.what()}; }
+    applyingParameter = previous; return std::monostate{};
+}
 Result<ProgramInfo> Vst2Instance::programInfo()
 {
     if (!effect || effect->num_programs < 0 || effect->num_programs > 4096)
@@ -51,6 +74,7 @@ Status Vst2Instance::setProgram(uint32_t index, uint64_t sequence, bool mirror)
                 parameterSequences[parameter] = sequence;
                 parameterValues[parameter] = effect->get_parameter(effect, parameter);
             }
+            callbackParameterSequences[parameter] = parameterSequences[parameter];
         }
         programSequence = sequence;
     }
@@ -153,6 +177,7 @@ Status Vst2Instance::restoreState(const StateEnvelope& state, uint64_t sequenceB
         for (uint32_t index = 0; index < parameterValues.size(); ++index)
         {
             parameterSequences[index] = std::max(parameterSequences[index], sequenceBarrier);
+            callbackParameterSequences[index] = parameterSequences[index];
             parameterValues[index] = effect->get_parameter(effect, index);
         }
         programSequence = std::max(programSequence, sequenceBarrier);

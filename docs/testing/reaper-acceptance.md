@@ -2,64 +2,86 @@
 
 ## Environment
 
-Initial host checks use a locally extracted portable REAPER 7.85 x64 with a dedicated profile under `out/reaper-test`. Its child environment redirects default plugin directories to that profile. Original user profiles and installed plugin directories are outside the test profile.
+Verification ran on Windows 11 Pro build 26200 with portable REAPER 7.85 x64 on November 7–8, 2026. CMake 4.4.5 and Visual Studio 2022 v143 built JUCE 8.0.13 and the pinned Xaymar SDK. The monitor runs at 150% scaling. Physical monitor-to-monitor DPI changes were unavailable on this single-monitor setup.
 
-## Factory feasibility
+Host acceptance uses `out/reaper-acceptance`, with its own INI, plugin search directory, cache and process. First-profile migration runs with automatic scanning disabled, then the script sets the explicit test-only VST path. Each launch uses `-newinst`. The audio backend is REAPER Dummy Audio, with a 1024-sample device block and project sample rates of 44.1 or 48 kHz. These playback observations use host meters and rendered sample comparisons.
 
-The native factory suite passes distinct generated identities, matching controller IDs, parameters available before editor creation, and stable identity after file renaming. REAPER scans two physical single-file outputs and lists Nytera Test Alpha and Nytera Test Beta under Nytera. The first Lua run loaded both and confirmed the original Gain parameter. The Lua acceptance script passes project save/reopen with both identities preserved.
+## Supplied plugin results
 
-## Source plugin checks
-
-| Source | Architecture | Inspection | Original editor | Audio and recall |
+| Source | VST2 architecture | Metadata and editor | State and audio | Original-editor automation |
 | --- | --- | --- | --- | --- |
-| Decapitator 5.0.1 | x86 | Pass, 12 parameters, 2 in / 2 out | Original editor visually verified inside REAPER, float/chain/reopen pass | Pending |
-| LexHall 1.3.8 | x64 | Pass, 53 parameters, 2 in / 2 out | Reports 780 x 540 | Pending |
-| Little AlterBoy 5.0.1 | x64 | Pass, 7 parameters, 2 in / 2 out | Reports 870 x 283 | Pending |
-| VPRE-73 2.5 BUILD 264 | x64 | Pass, 6 parameters, 2 in / 2 out | Direct bridge display and reopen pass, lock overlay visible | Pending |
-| BBE D82 Sonic Maximizer | x86 | Pass, Nomad Factory, 5 parameters, 2 in / 2 out | Original editor visually verified, direct bridge open/close/reopen pass, 800 x 160 | Pending |
+| Decapitator 5.0.1 | x86 | 12 parameters, stereo, original 870 × 423 editor | Pass, two differently configured instances, duplication, undo/redo, closed-editor recall, offline and real-time audio | Pass, Drive gesture recorded, envelope saved/reopened and rendered with editor closed |
+| Little AlterBoy 5.0.1 | x64 | 7 parameters, stereo, original 870 × 283 editor | Pass, two differently configured instances, duplication, undo/redo, closed-editor recall, offline and real-time audio | Pass, Pitch gesture recorded, envelope saved/reopened and rendered with editor closed |
+| BBE D82 Sonic Maximizer | x86 | Nomad Factory, 5 parameters, stereo, original 800 × 160 editor | Pass, two differently configured instances, duplication, undo/redo, closed-editor recall, offline and real-time audio | Pass, Low Contour gesture recorded, envelope saved/reopened and rendered with editor closed |
+| VPRE-73 2.5 BUILD 264 | x64 | 6 parameters, stereo, original editor opens with lock overlay | User confirmed this installation is unactivated. Activation remains a prerequisite for processing acceptance | Activation prerequisite |
+| LexHall 1.3.8 | x64 | Earlier inspection found 53 parameters and a 780 × 540 editor | Skipped at the user's request because an external file is unavailable | Skipped at the user's request |
 
-Versions come from PE resources. All four sources have now loaded and completed runtime metadata inspection through matching helpers. Editor dimensions are source-reported. Interaction, processing, and recall checks follow in later tasks. LexHall exceeded the initial 15-second inspection deadline on its first attempt and succeeded when allowed to finish. A timed successful initialization took 33.58 seconds, so startup and inspection use a 60-second deadline.
+SoundToys and Black Rooster versions come from PE resources. BBE has no PE version resource. Its runtime name and vendor are reported above. Commercial DLLs stay in the ignored local fixture directory and are excluded from the staged application.
 
-The cross-process editor regression initially reproduced a ten-second timeout. Dispatching synchronous sent window messages during control waits resolves the parent/child creation wait cycle. Native x86/x64 reopen, resize, owner teardown, and cross-bitness parenting checks pass. Direct source screenshots are recorded under `out/inspection`. The REAPER Lua check passes floating and FX-chain editor open/close/reopen for the embedded Decapitator and VPRE-73 conversions. `out/inspection/REAPER-Decapitator-editor.png` visually confirms the complete original Decapitator editor inside REAPER's normal frame. The user confirmed VPRE-73 is unactivated in this account, so its locked editor is an activation prerequisite for meaningful source audio tests.
+All four retained sources generate through the staged GUI with PATH restricted to Windows System32. Their single-file outputs are under `out/gui-generated`. All four editors pass floating, FX-chain, close and reopen checks. Healthy conversions present the original editor. Error recovery presents the bridge diagnostic and Retry button.
 
-## Embedded payload checks
+The commercial state script processes a two-second stereo signal through three recalled instances. Decapitator's offline peak/RMS is 0.475793/0.249203 and real-time peak is 0.392551. Little AlterBoy's offline peak/RMS is 0.004161/0.000830 and real-time peak is 0.001628. BBE's offline peak/RMS is 0.549784/0.265887 and real-time peak is 0.549784. These establish audible processing and recall, with source-specific processing determining the waveform.
 
-The seven package cases pass relocation with the original fixture DLL removed, real helper startup from the extracted payload, concurrent extraction, corrupted-cache repair, Unicode export/cache/helper paths, traversal/reserved-name rejection, transactional failed export, and rejection of a real Windows directory junction as cache root. All five supplied demo DLLs have been embedded into dedicated single-file test outputs. The additional BBE DLL scans in REAPER as D82 Sonic Maximizer under Nytera. Commercial-source processing and state recall remain pending.
+Original-editor mouse gestures change each vendor parameter in REAPER write mode. The saved envelope reopens with the same point count, then renders with the editor closed. Automation render peaks are 0.677158 for Decapitator, 0.199155 for Little AlterBoy and 0.336509 for BBE. The controlled fixture separately verifies expected automation plateau samples exactly.
 
-## Audio and event translation
+## Automated suites
 
-The current debug suite passes 62 x64 cases and 15 x86 native cases. Prepared bridge callbacks perform zero counted heap allocations, including parameter changes. Tests cover block lengths 0, 1, 63, 64, 127, 256, and 511, transport validity, stopped position, tempo changes within a quantum, seeks, held-note release, bypass latency, double-input conversion, suspend/resume, and ordered offline completion. MIDI and a 64 KiB SysEx message round-trip through both helper architectures.
+The final pre-review suites pass 101 x64 cases and 18 x86 cases in both Debug and Release. The x64 suite covers the generator, packaging/cache, VST3 COM entry points, bridging, audio/events, parameters, state and recovery. The x86 suite verifies the native VST2 ABI, inspection and editor lifecycle.
 
-The pipeline reports `2 * nextPowerOfTwo(maximumBlock) + sourceLatency`. With a 64-sample maximum and a 16-sample source delay, the measured impulse occurs at sample 144. With a 512-sample maximum it occurs at sample 1040. Bypass preserves the same reported delay. Both normal VST3 processing entry points pass native COM lifecycle tests. Float64 host buffers convert through the float32 bridge, so the transport's precision is float32.
+```powershell
+pwsh -File scripts/Build.ps1 -Configuration Debug
+ctest --test-dir out/build/x86 -C Debug --output-on-failure
+ctest --test-dir out/build/x64 -C Debug --output-on-failure
+pwsh -File scripts/Build.ps1 -Configuration Release
+pwsh -File scripts/Verify.ps1 -Configuration Release
+```
 
-`tests/reaper/Audio.lua` passes in portable REAPER 7.85 x64 with its dedicated Dummy Audio profile. The embedded x86 delay fixture renders an input impulse at sample 12000 with amplitude 0.4 after REAPER compensation. The x64 MIDI fixture renders exactly 12000 nonzero samples from 12000 through 23999 at amplitude 0.5. Both stereo channels match. Real-time playback meters observe the expected 0.4 and 0.5 peaks. The script verifies every output sample of both 48000-frame offline WAV files. Results are recorded in `out/reaper-test/audio-result.txt`.
+`Conversion.ConfiguredAssets` ensures each configuration uses its own fixtures. Release test results therefore exercise Release sources and helpers.
 
-## Parameters and host information
+## Acceptance coverage
 
-The 13 parameter cases pass stable source IDs, runtime MIDI capability filtering, native and VST3 controller/editor gesture delivery, setter-echo suppression, source formatting, block-boundary changes, stale-event rejection, concurrent callback queues, editor-close gesture completion, dynamic latency, UI-side transport timing, and recoverable topology-change detection. Sources without MIDI input expose their original parameters and VST3's required bypass parameter. MIDI sources also expose JUCE's internal MIDI-controller mappings.
+| Design check | Evidence and result |
+| --- | --- |
+| 1. Single-file scan, identity, category and parameters | REAPER lists source-derived identities under Nytera. Native factory tests construct processors before any editor and verify the complete parameter list. |
+| 2. Coexisting conversions and project recall | Distinct Alpha/Beta conversions retain identities after project reopen. Commercial projects recall multiple independently configured instances. |
+| 3. x86 and x64 sources produce audio | Decapitator and BBE x86, Little AlterBoy x64, and controlled sources pass real-time/offline checks. |
+| 4. Original editor lifecycle and DPI | Four supplied editors pass floating/FX-chain/open/close/reopen. Native containment tests pass content scales 100%, 150% and 200%. Physical multi-monitor DPI changes remain untested. |
+| 5. Automation recording and replay | Controlled x86 editor gesture renders exact expected plateaus. Three commercial original-editor gestures record and recall their source parameters. |
+| 6. MIDI instrument timing | Controlled instrument renders exactly 12000 nonzero samples, from sample 12000 through 23999 at amplitude 0.5, with matching stereo channels. Real-time peak is 0.5. Native MIDI/SysEx tests cover both source architectures. |
+| 7. Chunk and parameter/program state | Controlled x86 chunk and x64 program/parameter projects pass closed-editor two-instance recall, duplication, undo/redo and exact DSP plateaus. Commercial projects pass the same state workflow. |
+| 8. Latency | Measured native impulse delay is 144 samples for a 64-sample maximum plus 16 source samples, and 1040 for a 512-sample maximum plus 16. REAPER compensates the effect impulse back to sample 12000 at amplitude 0.4. Decapitator reports 2110 total samples with a 1024-sample maximum. |
+| 9. Blocks, rate, seeks, bypass and preparation | Native tests pass block lengths 0, 1, 63, 64, 127, 256 and 511, tempo changes within a quantum, stopped position, seeks, held-note release, bypass delay, float/double host buffers, repeated preparation and mode switches. |
+| 10. Failure containment and recovery | Native cases cover crash/hang during snapshot, independent instances, retained snapshots, cancelled startup, malformed control, pending editor work and stalled offline teardown. Typical forced teardown is 150–210 ms. REAPER Recovery passes termination of the first matched helper, continued audible output from the second instance, Retry, restored Gain 0.25 and resumed first-instance audio. |
+| 11. Relocation and automatic extraction | REAPER Relocation passes a renamed single file after removing its temporary original DLL, then passes again after moving its active cache entry aside. The exact cache entry reconstructs from the file, audio peaks at approximately 0.4 and project recall retains Gain 0.5. Native cases additionally cover corrupted cache repair, concurrent extraction, Unicode/spaces, traversal/reserved-name rejection and real directory junction rejection. |
+| 12. Toolchain-free generation | Four retained commercial sources export through the staged application with PATH containing only System32. Export uses the shipped templates and helpers. |
 
-`Parameter.Resolution` supplies two VST3 automation points in one 64-sample host block. The pinned JUCE adapter applies the last point to the whole block. Automation resolution is therefore one host block. The bridge preserves that block boundary when combining smaller host blocks into a quantum. Source formatting is cached off the audio thread for the current value. Arbitrary-value formatting and text entry use normalized fallback values.
+## Audio and event details
 
-`tests/reaper/Automation.lua` records an edit from the original x86 fixture editor in REAPER write mode, then closes the editor and renders the resulting envelope. Every stereo sample in the checked initial and changed plateaus matches amplitudes 0.4 and 0.6. The recorded parameter ID remains the source parameter ID. `out/reaper-test/automation-result.txt` records both passing stages. The bootstrap defers GUI work until REAPER's event loop is running. Each test launch uses one dedicated-profile process.
+Reported delay is `2 * nextPowerOfTwo(maximumHostBlock) + sourceLatency`. Bypass preserves that delay. The bridge carries float32 audio. Float64 host buffers convert through float32, and double-only source processing has a native conversion path.
 
-The full BBE interface is visible in `out/inspection/BBE Sonic Maximizer-editor.png`. Its editor and metadata checks pass with the current helper. Vendor-specific automation, audio, and state acceptance will run from the completed application assets in the final acceptance pass.
+Prepared bridge callbacks perform zero counted heap allocations. `Processor.LargeSysex` exercises consecutive 64 KiB and 1 MiB messages through actual VST3 processing, verifies bytes and sample offset, and inspects preallocated storage on both sides of JUCE's buffer swap. The pinned JUCE patch widens internal MIDI record lengths to 32 bits, handles raw SysEx and supports 4096 output events. Supported bridge bounds are 4096 MIDI events and 1 MiB MIDI bytes per quantum.
 
-## State and project recall
+`Processor.ModeSwitch` changes offline, real-time and prefetch modes on one instance without preparing again. Prefetch permits ordered bounded worker waits while reporting real-time source processing level. `Processor.HostPrefetch` also verifies REAPER's published real-time-thread query, because background calls can carry the generic real-time process mode. Real-time device processing retains the nonblocking pipeline. [REAPER host extensions](https://www.reaper.fm/sdk/vst/vst_ext.php), [VST3 host interface](https://github.com/justinfrankel/reaper-sdk/blob/main/sdk/reaper_vst3_interfaces.h)
 
-The state envelope carries a checksummed, versioned source binding, opaque bank or preset chunks when supported, and current-program/parameter fallback. Native tests cover both source architectures, early restore, timed-out capture retaining the last complete snapshot, independent instances, 9000-parameter snapshots, generation changes, legacy metadata, concurrent capture, and reentrant DAW saves during editor automation. The combined JUCE component/controller synchronizes immediately after state restore. A native regression reproduced stale controller values before this adaptation.
+`Parameter.Resolution` gives VST3 two points in a 64-sample host block. The pinned JUCE adapter applies the last point to that block. Automation resolution is one host block. Source display text is cached off the audio thread for the current value. Arbitrary-value formatting and text entry use normalized fallback values.
 
-`tests/reaper/State.lua` passes with the x86 chunk fixture and x64 parameter/program fixture. Each case saves and reopens two differently configured instances with editors closed, duplicates one instance, exercises undo/redo, and renders the restored chain. Both stereo channels match the expected 0.0375 amplitude across all checked plateau samples. Results are recorded in `out/reaper-test/state-result.txt`. REAPER's completed-render window must be closed before the next project can open. Commercial-plugin state acceptance follows the final-assets pass already recorded above.
+## State and editor ordering
 
-## Failure containment and retry
+State carries a checksummed source binding, opaque bank/preset data when available, current program/name and reported parameters. Early restore runs before audible processing. Capture timeout preserves the last complete envelope. Tests cover 9000-parameter snapshots, legacy metadata, simultaneous capture, generation changes and a host requesting state reentrantly during automation.
 
-The eight recovery cases pass crash-during-state, hung capture, last-snapshot retry with an independently healthy instance, simultaneous teardown/control work, malformed requests, pending editor creation, cancelled partial startup, and a stalled offline worker. Instance-owned jobs terminate the matched helper. Control requests share one total deadline across mutex acquisition, send and receive. Stop cancels in-flight I/O and offline waits, allows a short graceful shutdown, then terminates the owned job. Hung-control and offline-stop regressions complete in roughly 150–210 ms on this machine. A failed editor offers retry of its existing binding and state.
+The combined JUCE component/controller synchronizes immediately after restore. Source acknowledgements prevent older editor notifications or parameter polls from overwriting newer queued host values. Editor creation preserves the source program and scalar values if the source changes them during initialization.
 
-The native MIDI regression rejects source events outside the actual processing segment. Both architecture suites verify the check. The current complete debug suites pass 87 x64 and 18 x86 tests.
+REAPER acceptance yields separate message-loop turns between edits, undo/redo and save/render. A native stack trace showed REAPER can submit an older pending host parameter later when all those operations run in one Lua callback. The bridge honors subsequently delivered host automation. The UI-turn workflow passes controlled and commercial state checks.
 
-## Standalone generator
+## Reproduction and evidence
 
-The staged JUCE application displays Nytera VST2 Wrapper, inspects sources in matched child helpers, reports PE imports and Windows loader diagnostics, accepts optional support files, previews the original editor from a packaged/extracted payload, and exports transactionally. Source inspection and generation run on an owned background worker. Cancellation terminates a stalled inspector and preserves an existing output. Destination checks protect input DLLs and runtime templates, and re-export inside a support directory excludes the previous output from its own embedded payload.
+```powershell
+pwsh -File scripts/Verify.ps1 -Configuration Release `
+  -ReaperPath 'C:\Program Files\REAPER (x64)\reaper.exe' -AcceptanceScript Audio
+```
 
-GUI exports succeeded for all five supplied DLLs with PATH restricted to Windows System32. The BBE preview screenshot is `out/inspection/Nytera-BBE-preview.png`. `out/inspection/Nytera-generator.png` shows the application after a successful single-file export. Factory names and class identities match the diagnostic export path for Decapitator, Little AlterBoy, VPRE-73 and BBE. The seven conversion tests pass, and the full x64 debug suite passes 94 cases.
+The script also supports State, Automation, Editors, Recovery and Relocation. Close completed-render dialogs between projects. Automation requests a click in the controlled original editor. Recovery requests terminating the first instance's matched helper and using Retry. Editors expects the four local exports under `out/gui-generated`. Relocation removes a temporary source copy and renames its conversion before loading. To repeat cache reconstruction, close the dedicated profile, move that conversion's test-cache entry aside and launch Relocation again. The verification run preserved old cache entries under sibling names after automatic review rejected recursive deletion.
 
-The user requested skipping LexHall after observing an unavailable external file. Its earlier metadata/export observations remain recorded. Remaining LexHall compatibility acceptance is skipped at the user's request.
+Commercial scripts are `tests/reaper/CommercialState.lua` and `CommercialAutomation.lua`. They require the corresponding local exports in the test profile, and the automation script expects gestures on Drive, Pitch and Low Contour during the marked recording interval. CommercialState creates its input WAV.
+
+Local evidence lives under `out/reaper-acceptance` in `audio-result.txt`, `state-result.txt`, `automation-result.txt`, `commercial-state-result.txt`, `commercial-automation-result.txt`, `editors-result.txt`, `recovery-result.txt` and `relocation-result.txt`. Screenshots are under `out/inspection`. Build and suite logs are under `out`.

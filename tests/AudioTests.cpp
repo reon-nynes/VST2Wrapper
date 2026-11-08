@@ -15,9 +15,9 @@ struct AudioSession
     explicit AudioSession(uint32_t maximum = 64, std::string variant = "NyteraFixture.dll", bool x86 = false) : maximum(maximum)
     {
         auto root = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build";
-        auto source = root / "x64/Debug" / variant;
+        auto source = root / "x64/" NYTERA_TEST_CONFIG / variant;
         { auto instance = require(Vst2Instance::open(source)); manifest = require(instance->inspect()); }
-        auto folder = root / (x86 ? "x86" : "x64") / "Debug";
+        auto folder = root / (x86 ? "x86" : "x64") / NYTERA_TEST_CONFIG;
         source = folder / variant;
         manifest.architecture = x86 ? Architecture::x86 : Architecture::x64;
         manifest.sourceHash = sha256(readFile(source));

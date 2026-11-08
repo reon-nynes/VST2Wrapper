@@ -102,10 +102,18 @@ local function run()
     reaper.SetEditCurPos(0, false, false)
     reaper.Track_GetPeakHoldDB(track, 0, true)
     reaper.OnPlayButton()
-    local finish = reaper.time_precise() + 1.2
+    local startupDeadline, finish = reaper.time_precise() + 30, nil
     local peak = 0
     local function wait()
       peak = math.max(peak, reaper.Track_GetPeakInfo(track, 0))
+      if not finish then
+        if reaper.GetPlayState() & 1 ~= 0 and reaper.GetPlayPosition() > 0.005 then finish = reaper.time_precise() + 1.2
+        elseif reaper.time_precise() >= startupDeadline then log('FAIL playback did not start after closing the render dialog') output:close() return
+        else
+          if reaper.GetPlayState() & 1 == 0 then reaper.OnPlayButton() end
+          reaper.defer(wait) return
+        end
+      end
       if reaper.time_precise() < finish then reaper.defer(wait) return end
       reaper.OnStopButton()
       log('Realtime ' .. name .. ' peak amplitude ' .. peak)

@@ -2,8 +2,23 @@
 #include "Parameter.h"
 #include "Editor.h"
 #include "package/Cache.h"
+#include "ReaperHost.h"
 namespace nytera
 {
+void moduleSetPrefetch(juce::AudioProcessor& processor, bool prefetch)
+{
+    static_cast<Processor&>(processor).setPrefetch(prefetch);
+}
+void Processor::setIHostApplication(Steinberg::FUnknown* host)
+{
+    if (!host) return;
+    ReaperHostApplication* reaper = nullptr;
+    if (host->queryInterface(ReaperHostApplication::iid, reinterpret_cast<void**>(&reaper)) == Steinberg::kResultOk && reaper)
+    {
+        hostRealtimeQuery = reinterpret_cast<int (*)()>(reaper->getReaperApi("IsInRealTimeAudio"));
+        reaper->release();
+    }
+}
 juce::AudioProcessor::BusesProperties Processor::makeBuses()
 {
     juce::AudioProcessor::BusesProperties buses;
@@ -98,7 +113,8 @@ void Processor::prepareToPlay(double rate, int maximumBlock)
     inputMidi.reserve(4096);
     outputMidi.ensureSize(2 * (1024 * 1024 + 4096 * 8));
     lastConfig = ProcessConfig{rate, static_cast<uint32_t>(std::max(1, maximumBlock)),
-        static_cast<uint32_t>(moduleBinding().inputs.size()), static_cast<uint32_t>(moduleBinding().outputs.size()), isNonRealtime()};
+        static_cast<uint32_t>(moduleBinding().inputs.size()), static_cast<uint32_t>(moduleBinding().outputs.size()), false};
+    // VST3 may change render mode without preparing again. Each block carries it.
     auto started = startSource();
     if (auto* failure = std::get_if<Failure>(&started)) { runtimeDiagnostic = juce::String::fromUTF8(failure->message.c_str()); return; }
     auto prepared = client.prepare(*lastConfig);
@@ -119,6 +135,8 @@ TransportSnapshot Processor::transportSnapshot() const
     snapshot.projectSamples = processingPosition;
     snapshot.streamSamples = processingPosition;
     if (isNonRealtime()) snapshot.processFlags = 1;
+    auto realtimeQuery = hostRealtimeQuery.load();
+    if (prefetch || (realtimeQuery && realtimeQuery() == 0)) snapshot.processFlags |= 4;
     if (auto* playhead = getPlayHead())
     {
         if (auto position = playhead->getPosition())

@@ -20,6 +20,7 @@ public:
     Status prepare(const ProcessConfig&);
     void suspend();
     Status applyParameter(const ParameterEvent&);
+    uint64_t parameterSequence(uint32_t index) const noexcept;
     Result<std::string> parameterDisplay(uint32_t);
     Status refreshLatency();
     double tailSeconds();
@@ -28,6 +29,7 @@ public:
     Result<StateEnvelope> captureState();
     Status restoreState(const StateEnvelope&, uint64_t sequenceBarrier = 0);
     Status setProgram(uint32_t, uint64_t sequence = 0, bool mirror = false);
+    Status openEditor(void* parent);
     Status process(AudioBlockView, EventBlockView, const TransportSnapshot&);
     void resetEvents();
     void close() noexcept;
@@ -54,6 +56,7 @@ private:
     std::vector<vst_event_midi_sysex_t> sysexEvents;
     std::vector<double> doubleInputs, doubleOutputs;
     std::vector<uint64_t> parameterSequences;
+    std::unique_ptr<std::atomic<uint64_t>[]> callbackParameterSequences;
     std::vector<float> parameterValues;
     uint64_t programSequence = 0;
     std::optional<Manifest> binding;

@@ -20,7 +20,7 @@ struct PackageFixture
         std::filesystem::copy_file(NYTERA_FIXTURE, source, std::filesystem::copy_options::overwrite_existing);
         auto instance = require(Vst2Instance::open(source));
         manifest = require(instance->inspect());
-        auto helper = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build/x64/Debug/NyteraBridge.exe";
+        auto helper = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build/x64/" NYTERA_TEST_CONFIG "/NyteraBridge.exe";
         input = {manifest, NYTERA_EFFECT_TEMPLATE, helper, source, {}};
         output = root / "Embedded.vst3";
     }

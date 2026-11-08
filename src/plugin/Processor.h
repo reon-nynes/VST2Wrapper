@@ -5,7 +5,7 @@
 #include <mutex>
 namespace nytera
 {
-class Processor final : public juce::AudioProcessor, private juce::Timer
+class Processor final : public juce::AudioProcessor, private juce::Timer, private juce::VST3ClientExtensions
 {
 public:
     Processor();
@@ -36,7 +36,10 @@ public:
     Status retrySource();
     BridgeClient& bridge() { return client; }
     juce::String diagnostic() const;
+    void setPrefetch(bool value) { prefetch = value; }
+    juce::VST3ClientExtensions* getVST3ClientExtensions() override { return this; }
 private:
+    void setIHostApplication(Steinberg::FUnknown*) override;
     static BusesProperties makeBuses();
     template<class Sample> void processBuffer(juce::AudioBuffer<Sample>&, juce::MidiBuffer&, bool bypass = false);
     TransportSnapshot transportSnapshot() const;
@@ -50,6 +53,8 @@ private:
     std::vector<MidiEvent> inputMidi;
     juce::MidiBuffer outputMidi;
     int64_t processingPosition = 0;
+    bool prefetch = false;
+    std::atomic<int (*)()> hostRealtimeQuery {nullptr};
     std::atomic<bool> audioReady {false};
     std::atomic<bool> pendingNotesOff {false};
     std::optional<ProcessConfig> lastConfig;

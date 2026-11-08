@@ -5,7 +5,7 @@
 using namespace nytera;
 static std::filesystem::path assets(const char* architecture, const char* filename)
 {
-    return std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build" / architecture / "Debug" / filename;
+    return std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build" / architecture / NYTERA_TEST_CONFIG / filename;
 }
 static Manifest fixtureBinding(const std::filesystem::path& source, Architecture architecture)
 {

@@ -16,7 +16,8 @@ Status EditorHost::open(HWND parent)
     try
     {
         opened = true;
-        source.dispatch(VST_EFFECT_OPCODE_EDITOR_OPEN, 0, 0, container);
+        auto initialized = source.openEditor(container);
+        if (auto* failure = std::get_if<Failure>(&initialized)) { close(); return *failure; }
         source.dispatch(VST_EFFECT_OPCODE_EDITOR_GET_RECT, 0, 0, &rectangle);
         if (rectangle && rectangle->right > rectangle->left && rectangle->bottom > rectangle->top)
             resize({static_cast<uint32_t>(rectangle->right - rectangle->left), static_cast<uint32_t>(rectangle->bottom - rectangle->top)});
