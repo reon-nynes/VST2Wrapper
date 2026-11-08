@@ -2,6 +2,8 @@
 #include "common/Manifest.h"
 #include "common/Processing.h"
 #include "common/Wire.h"
+#include "common/State.h"
+#include <optional>
 #include <chrono>
 #include <memory>
 
@@ -29,12 +31,18 @@ public:
     Result<ParameterDisplay> parameterDisplay(uint32_t index);
     Result<std::vector<float>> parameterValues();
     Status flushParameters();
+    Result<StateEnvelope> captureState(std::chrono::milliseconds timeout = std::chrono::seconds(10));
+    Status restoreState(const StateEnvelope&);
+    std::optional<StateEnvelope> lastState() const;
+    Result<ProgramInfo> programInfo();
+    double tailLengthSeconds() const noexcept;
     ProcessResult process(AudioBlockView, EventBlockView, const TransportSnapshot&) noexcept;
     ProcessResult process(DoubleAudioBlockView, EventBlockView, const TransportSnapshot&) noexcept;
     uint32_t latencySamples() const noexcept;
     void resetProcessing() noexcept;
 private:
     struct Impl;
+    Status applyState(const StateEnvelope&, uint64_t sequenceBarrier, std::chrono::milliseconds timeout);
     std::unique_ptr<Impl> impl;
 };
 }

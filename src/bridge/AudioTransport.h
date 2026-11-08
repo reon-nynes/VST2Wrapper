@@ -3,6 +3,7 @@
 #include "common/Processing.h"
 #include <memory>
 #include <array>
+#include <optional>
 
 namespace nytera
 {
@@ -38,7 +39,9 @@ struct alignas(64) SharedAudioHeader
 {
     uint32_t magic, version, quantum, inputs, outputs, slots;
     volatile LONG generation, error, underruns;
-    uint32_t parameterCount, reserved[6];
+    uint32_t parameterCount, programCount, reserved;
+    volatile LONG64 programSequence;
+    uint32_t padding[2];
 };
 struct alignas(64) AudioSlotHeader
 {
@@ -50,6 +53,7 @@ struct alignas(64) AudioSlotHeader
     std::byte reserved[32];
 };
 static_assert(sizeof(SharedAudioHeader) == 64);
+static_assert(offsetof(SharedAudioHeader, programSequence) == 48);
 static_assert(sizeof(AudioSlotHeader) == 128);
 static_assert(offsetof(AudioSlotHeader, transport) == 16);
 static_assert(sizeof(MidiDescriptor) == 16);
@@ -68,6 +72,10 @@ public:
     SharedMidi& outputMidi(uint32_t slot) const;
     SharedTransport& transportMarkers(uint32_t slot) const;
     SharedParameters& parameters(uint32_t slot) const;
+    uint64_t parameterSequence(uint32_t index) const;
+    uint64_t programSequence() const;
+    void acknowledge(const ParameterEvent&) const;
+    void acknowledgeState(uint64_t sequence) const;
     HANDLE readyEvent() const { return ready.get(); }
     HANDLE doneEvent() const { return done.get(); }
     const ProcessConfig config;
@@ -78,7 +86,7 @@ private:
     static Result<std::unique_ptr<SharedAudio>> map(const std::wstring&, const ProcessConfig&, bool create);
     void* view = nullptr;
     Handle mapping, ready, done;
-    size_t inputOffset, outputOffset, inputMidiOffset, outputMidiOffset, transportOffset, parameterOffset, slotBytes, totalBytes;
+    size_t inputOffset, outputOffset, inputMidiOffset, outputMidiOffset, transportOffset, parameterOffset, slotOffset, slotBytes, totalBytes;
 };
 
 class AudioTransport
@@ -91,6 +99,9 @@ public:
     uint32_t latency() const noexcept { return memory->quantum * 2; }
     const std::wstring& name() const { return memory->name; }
     SharedAudio& shared() { return *memory; }
+    std::vector<ParameterEvent> parameterCheckpoint() const;
+    void skipSamples(uint64_t count) noexcept;
+    void restoreCheckpoint(uint32_t program, std::span<const float> values, uint64_t sequence);
 private:
     explicit AudioTransport(std::unique_ptr<SharedAudio>);
     bool submit() noexcept;
@@ -104,6 +115,7 @@ private:
     std::vector<float> parameterValues;
     std::vector<uint8_t> parameterSeen;
     std::vector<uint64_t> parameterSequences;
+    std::optional<ParameterEvent> programEvent;
     TransportSnapshot inputTransport;
     int64_t clock = 0, epoch = 0, expectedProject = 0;
     uint64_t outputSequence = UINT64_MAX;

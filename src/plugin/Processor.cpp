@@ -14,17 +14,21 @@ juce::AudioProcessor::BusesProperties Processor::makeBuses()
 Processor::Processor() : AudioProcessor(makeBuses())
 {
     for (const auto& descriptor : moduleBinding().parameters) addParameter(new Parameter(descriptor, client));
+    for (const auto& name : moduleBinding().programs.names) programNames.add(juce::String::fromUTF8(name.c_str()));
     setLatencySamples(static_cast<int>(moduleBinding().initialDelay));
     startTimerHz(30);
 }
 Processor::~Processor()
 {
     stopTimer();
+    std::lock_guard lock(lifecycleMutex);
     for (auto* parameter : getParameters()) static_cast<Parameter*>(parameter)->endSourceGesture();
     client.stop();
 }
 void Processor::timerCallback()
 {
+    std::unique_lock lock(lifecycleMutex, std::try_to_lock);
+    if (!lock.owns_lock()) return;
     if (client.processId() == 0 || runtimeDiagnostic.isNotEmpty()) return;
     if (!audioReady)
     {
@@ -61,6 +65,8 @@ void Processor::timerCallback()
     }
     if (refreshValues)
     {
+        auto programs = client.programInfo();
+        if (auto* info = std::get_if<ProgramInfo>(&programs)) syncPrograms(*info, true);
         auto values = client.parameterValues();
         if (auto* current = std::get_if<std::vector<float>>(&values))
             for (size_t i = 0; i < current->size() && i < static_cast<size_t>(getParameters().size()); ++i)
@@ -78,21 +84,24 @@ void Processor::timerCallback()
 }
 void Processor::prepareToPlay(double rate, int maximumBlock)
 {
+    std::lock_guard lock(lifecycleMutex);
     audioReady = false;
     processingPosition = 0;
     inputMidi.reserve(4096);
     outputMidi.ensureSize(2 * (1024 * 1024 + 4096 * 8));
-    auto started = ensureStarted();
-    if (std::holds_alternative<Failure>(started)) return;
+    auto started = startSource();
+    if (auto* failure = std::get_if<Failure>(&started)) { runtimeDiagnostic = juce::String::fromUTF8(failure->message.c_str()); return; }
     auto prepared = client.prepare({rate, static_cast<uint32_t>(std::max(1, maximumBlock)),
         static_cast<uint32_t>(moduleBinding().inputs.size()), static_cast<uint32_t>(moduleBinding().outputs.size()), isNonRealtime()});
     audioReady = std::holds_alternative<std::monostate>(prepared);
-    if (audioReady) setLatencySamples(static_cast<int>(client.latencySamples()));
+    if (audioReady) { setLatencySamples(static_cast<int>(client.latencySamples())); tailDuration = client.tailLengthSeconds(); }
+    else runtimeDiagnostic = juce::String::fromUTF8(std::get<Failure>(prepared).message.c_str());
 }
 void Processor::releaseResources()
 {
+    std::lock_guard lock(lifecycleMutex);
     audioReady = false;
-    client.releaseAudio();
+    if (client.processId()) client.releaseAudio();
 }
 TransportSnapshot Processor::transportSnapshot() const
 {
@@ -169,7 +178,11 @@ bool Processor::isBusesLayoutSupported(const BusesLayout& layout) const
 juce::AudioProcessorEditor* Processor::createEditor() { return new Editor(*this); }
 Status Processor::ensureStarted()
 {
-    std::lock_guard lock(startupMutex);
+    std::lock_guard lock(lifecycleMutex);
+    return startSource();
+}
+Status Processor::startSource()
+{
     if (client.processId() != 0) return std::monostate{};
     if (!payload)
     {
@@ -177,7 +190,102 @@ Status Processor::ensureStarted()
         if (auto* error = std::get_if<Failure>(&extracted)) return *error;
         payload = std::make_unique<ExtractedPayload>(std::get<ExtractedPayload>(std::move(extracted)));
     }
-    return client.start(moduleBinding(), payload->helper, payload->source);
+    auto started = client.start(moduleBinding(), payload->helper, payload->source);
+    if (auto* failure = std::get_if<Failure>(&started)) return *failure;
+    auto flushed = client.flushParameters();
+    if (auto* failure = std::get_if<Failure>(&flushed)) return *failure;
+    auto values = client.parameterValues();
+    if (auto* failure = std::get_if<Failure>(&values)) return *failure;
+    const auto& current = std::get<std::vector<float>>(values);
+    if (current.size() != static_cast<size_t>(getParameters().size())) return Failure{ErrorCode::identity, "Source parameter topology changed"};
+    for (size_t index = 0; index < current.size(); ++index) static_cast<Parameter*>(getParameters()[static_cast<int>(index)])->receiveSource(current[index]);
+    auto programs = client.programInfo();
+    if (auto* info = std::get_if<ProgramInfo>(&programs)) syncPrograms(*info, true);
+    return std::monostate{};
+}
+juce::String Processor::diagnostic() const
+{
+    std::unique_lock lock(lifecycleMutex, std::try_to_lock);
+    return lock.owns_lock() ? runtimeDiagnostic : juce::String{};
+}
+void Processor::setCurrentProgram(int program)
+{
+    if (program < 0 || program >= getNumPrograms()) return;
+    currentProgram = program;
+    client.enqueueParameter({static_cast<uint32_t>(program), 0, 0, 3});
+}
+const juce::String Processor::getProgramName(int program)
+{
+    if (program < 0 || program >= getNumPrograms()) return {};
+    juce::SpinLock::ScopedTryLockType lock(programNameLock);
+    return lock.isLocked() ? programNames[program] : juce::String::fromUTF8(moduleBinding().programs.names[static_cast<size_t>(program)].c_str());
+}
+void Processor::syncPrograms(const ProgramInfo& info, bool mirror)
+{
+    if (moduleBinding().schemaVersion < 2) return;
+    if (info.names.size() != moduleBinding().programs.names.size()) return;
+    auto previous = currentProgram.exchange(static_cast<int>(info.current));
+    {
+        juce::SpinLock::ScopedLockType lock(programNameLock);
+        programNames.clear();
+        for (const auto& name : info.names) programNames.add(juce::String::fromUTF8(name.c_str()));
+    }
+    if (mirror && previous != static_cast<int>(info.current)) client.enqueueParameter({info.current, 0, 0, 4});
+}
+void Processor::cacheState(const StateEnvelope& state)
+{
+    for (size_t index = 0; index < state.parameters.size(); ++index)
+        static_cast<Parameter*>(getParameters()[static_cast<int>(index)])->cacheValue(state.parameters[index]);
+    currentProgram = static_cast<int>(std::min(state.program, static_cast<uint32_t>(getNumPrograms() - 1)));
+    if (!state.programName.empty() && state.program < static_cast<uint32_t>(getNumPrograms()))
+    {
+        juce::SpinLock::ScopedLockType lock(programNameLock);
+        programNames.set(static_cast<int>(state.program), juce::String::fromUTF8(state.programName.c_str()));
+    }
+}
+void Processor::getStateInformation(juce::MemoryBlock& destination)
+{
+    std::lock_guard lock(lifecycleMutex);
+    auto saved = client.lastState();
+    if (!saved || client.processId())
+    {
+        auto started = startSource();
+        if (auto* failure = std::get_if<Failure>(&started)) runtimeDiagnostic = juce::String::fromUTF8(failure->message.c_str());
+        else
+        {
+            auto captured = client.captureState();
+            if (auto* state = std::get_if<StateEnvelope>(&captured)) saved = *state;
+            else runtimeDiagnostic = juce::String::fromUTF8(std::get<Failure>(captured).message.c_str());
+        }
+    }
+    if (!saved) { destination.setSize(0); return; }
+    try
+    {
+        auto bytes = encodeState(*saved);
+        destination.setSize(bytes.size());
+        std::memcpy(destination.getData(), bytes.data(), bytes.size());
+    }
+    catch (const std::exception& error) { runtimeDiagnostic = juce::String::fromUTF8(error.what()); }
+}
+void Processor::setStateInformation(const void* data, int size)
+{
+    if (!data || size <= 0) return;
+    std::lock_guard lock(lifecycleMutex);
+    auto decoded = decodeState({static_cast<const std::byte*>(data), static_cast<size_t>(size)});
+    if (auto* failure = std::get_if<Failure>(&decoded)) { runtimeDiagnostic = juce::String::fromUTF8(failure->message.c_str()); return; }
+    const auto& state = std::get<StateEnvelope>(decoded);
+    auto valid = validateStateBinding(state, moduleBinding());
+    if (auto* failure = std::get_if<Failure>(&valid)) { runtimeDiagnostic = juce::String::fromUTF8(failure->message.c_str()); return; }
+    auto restored = client.restoreState(state);
+    if (auto* failure = std::get_if<Failure>(&restored)) { runtimeDiagnostic = juce::String::fromUTF8(failure->message.c_str()); audioReady = false; return; }
+    cacheState(state);
+    if (client.processId())
+    {
+        auto actual = client.lastState();
+        if (actual) cacheState(*actual);
+        setLatencySamples(static_cast<int>(client.latencySamples())); tailDuration = client.tailLengthSeconds();
+    }
+    updateHostDisplay(ChangeDetails().withProgramChanged(true).withParameterInfoChanged(true));
 }
 }
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new nytera::Processor(); }

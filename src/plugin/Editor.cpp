@@ -59,9 +59,10 @@ void Editor::timerCallback()
     auto* peer = getPeer();
     auto scale = peer ? peer->getPlatformScaleFactor() : 1.0;
     if (getWidth() != juce::roundToInt(size.width / scale) || getHeight() != juce::roundToInt(size.height / scale)) applySize(size.width, size.height);
-    if (failure.isEmpty() && processor.diagnostic().isNotEmpty())
+    auto diagnostic = processor.diagnostic();
+    if (failure.isEmpty() && diagnostic.isNotEmpty())
     {
-        failure = processor.diagnostic();
+        failure = diagnostic;
         nativeView.setVisible(false);
         repaint();
     }

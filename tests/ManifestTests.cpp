@@ -34,6 +34,17 @@ TEST("Manifest.InfiniteTail")
     manifest.tailSeconds = std::numeric_limits<double>::infinity();
     CHECK(require(decodeManifest(encodeManifest(manifest))).tailSeconds == manifest.tailSeconds);
 }
+TEST("Manifest.ProgramMetadata")
+{
+    auto manifest = assignBindingIds(example());
+    manifest.programs = {1, {"First", "Second"}};
+    CHECK(require(decodeManifest(encodeManifest(manifest))) == manifest);
+}
+TEST("Manifest.LegacyVersion")
+{
+    auto manifest = assignBindingIds(example()); manifest.schemaVersion = 1;
+    CHECK(require(decodeManifest(encodeManifest(manifest))) == manifest);
+}
 
 TEST("Manifest.Truncated")
 {

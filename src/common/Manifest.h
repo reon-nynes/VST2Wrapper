@@ -20,6 +20,12 @@ struct PinInfo
     bool active = true;
     bool operator==(const PinInfo&) const = default;
 };
+struct ProgramInfo
+{
+    uint32_t current = 0;
+    std::vector<std::string> names {"Default"};
+    bool operator==(const ProgramInfo&) const = default;
+};
 
 struct PayloadEntry
 {
@@ -32,7 +38,7 @@ struct PayloadEntry
 
 struct Manifest
 {
-    uint32_t schemaVersion = 1;
+    uint32_t schemaVersion = 2;
     Id128 conversionId {}, processorId {}, controllerId {};
     Hash256 sourceHash {};
     uint32_t sourceUniqueId = 0;
@@ -50,11 +56,14 @@ struct Manifest
     uint32_t initialDelay = 0;
     double tailSeconds = 0;
     std::vector<PayloadEntry> payloads;
+    ProgramInfo programs;
     bool operator==(const Manifest&) const = default;
 };
 
 Result<Architecture> inspectPeArchitecture(const std::filesystem::path&);
 Bytes encodeManifest(const Manifest&);
 Result<Manifest> decodeManifest(std::span<const std::byte>);
+Bytes encodePrograms(const ProgramInfo&);
+Result<ProgramInfo> decodePrograms(std::span<const std::byte>);
 Manifest assignBindingIds(Manifest);
 }

@@ -9,6 +9,7 @@ struct ProcessConfig
     uint32_t inputs = 2, outputs = 2;
     bool offline = false;
     uint32_t parameterCount = 0;
+    uint32_t programCount = 1;
 };
 struct HostNotification
 {
@@ -48,7 +49,7 @@ struct ParameterEvent
 {
     uint32_t index = 0, offset = 0;
     float normalized = 0;
-    uint32_t origin = 1; // 1 is host automation, 2 mirrors a source edit into the cache.
+    uint32_t origin = 1; // 1/2 are host/source values, 3/4 are host/source programs.
     uint64_t sequence = 0;
 };
 struct ParameterDisplay { float normalized = 0; std::string text; };

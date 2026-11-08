@@ -2,6 +2,8 @@
 #include "common/Manifest.h"
 #include "common/Vst2.h"
 #include "common/Processing.h"
+#include "common/State.h"
+#include <optional>
 #include <windows.h>
 #include <memory>
 #include <functional>
@@ -22,6 +24,10 @@ public:
     Status refreshLatency();
     double tailSeconds();
     void publishTransport(const TransportSnapshot&) noexcept;
+    Result<ProgramInfo> programInfo();
+    Result<StateEnvelope> captureState();
+    Status restoreState(const StateEnvelope&, uint64_t sequenceBarrier = 0);
+    Status setProgram(uint32_t, uint64_t sequence = 0, bool mirror = false);
     Status process(AudioBlockView, EventBlockView, const TransportSnapshot&);
     void resetEvents();
     void close() noexcept;
@@ -48,9 +54,13 @@ private:
     std::vector<vst_event_midi_sysex_t> sysexEvents;
     std::vector<double> doubleInputs, doubleOutputs;
     std::vector<uint64_t> parameterSequences;
+    std::vector<float> parameterValues;
+    uint64_t programSequence = 0;
+    std::optional<Manifest> binding;
     std::vector<float> dryDelay;
     uint32_t dryPosition = 0, dryLatency = 0;
     bool flushNotes = false;
+    bool hasProcessed = false;
     static thread_local Vst2Instance* processing;
     static thread_local const TransportSnapshot* processTransport;
     static thread_local EventBlockView* processEvents;

@@ -51,6 +51,11 @@ public:
         if (implicit) endChangeGesture();
     }
     bool needsDisplay() { return displayDirty.exchange(false); }
+    void cacheValue(float next)
+    {
+        value.store(juce::jlimit(0.0f, 1.0f, next), std::memory_order_relaxed);
+        displayDirty = true;
+    }
     void cacheDisplay(const ParameterDisplay& display)
     {
         juce::SpinLock::ScopedLockType lock(displayLock);

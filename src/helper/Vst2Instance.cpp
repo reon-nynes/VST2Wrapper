@@ -52,6 +52,7 @@ Result<std::unique_ptr<Vst2Instance>> Vst2Instance::open(const std::filesystem::
         effect->host_internal = instance.get();
         if (effect->num_params < 0 || effect->num_params > 65536 || effect->num_inputs < 0
             || effect->num_inputs > 256 || effect->num_outputs < 0 || effect->num_outputs > 256
+            || effect->num_programs < 0 || effect->num_programs > 4096
             || (effect->num_params > 0 && (!effect->get_parameter || !effect->set_parameter))
             || (!effect->process_float && !effect->process && !effect->process_double))
             return Failure{ErrorCode::invalidData, "Invalid VST2 counts or function pointers"};
@@ -64,9 +65,11 @@ Result<std::unique_ptr<Vst2Instance>> Vst2Instance::open(const std::filesystem::
         instance->dispatch(VST_EFFECT_OPCODE_SET_BLOCK_SIZE, 0, 512);
         trace("VST2 instance initialized");
         if (effect->num_params < 0 || effect->num_params > 65536 || effect->num_inputs < 0 || effect->num_inputs > 256
-            || effect->num_outputs < 0 || effect->num_outputs > 256)
+            || effect->num_outputs < 0 || effect->num_outputs > 256 || effect->num_programs < 0 || effect->num_programs > 4096)
             return Failure{ErrorCode::invalidData, "Source topology is invalid after initialization"};
         instance->parameterSequences.resize(static_cast<size_t>(effect->num_params));
+        instance->parameterValues.resize(static_cast<size_t>(effect->num_params));
+        for (uint32_t i = 0; i < instance->parameterValues.size(); ++i) instance->parameterValues[i] = effect->get_parameter(effect, i);
         return instance;
     }
     catch (const std::exception& error) { return Failure{ErrorCode::plugin, error.what()}; }
@@ -93,6 +96,7 @@ bool Vst2Instance::readTransport(TransportSnapshot& snapshot) const noexcept
 }
 Status Vst2Instance::applyParameter(const ParameterEvent& event)
 {
+    if (event.origin == 3 || event.origin == 4) return setProgram(event.index, event.sequence, event.origin == 4);
     if (!effect || event.index >= static_cast<uint32_t>(effect->num_params) || !std::isfinite(event.normalized)
         || event.normalized < 0 || event.normalized > 1 || (event.origin != 1 && event.origin != 2)
         || event.index >= parameterSequences.size())
@@ -101,13 +105,14 @@ Status Vst2Instance::applyParameter(const ParameterEvent& event)
     // Control-thread changes may overtake an older block in the audio pipeline.
     if (event.sequence && event.sequence <= lastSequence) return std::monostate{};
     if (event.origin == 2 && effect->get_parameter(effect, event.index) == event.normalized)
-    { lastSequence = event.sequence; return std::monostate{}; }
+    { lastSequence = event.sequence; parameterValues[event.index] = event.normalized; return std::monostate{}; }
     auto* previous = applyingParameter;
     applyingParameter = this;
     try { effect->set_parameter(effect, event.index, event.normalized); }
     catch (...) { applyingParameter = previous; throw; }
     applyingParameter = previous;
     lastSequence = event.sequence;
+    parameterValues[event.index] = event.normalized;
     return std::monostate{};
 }
 Result<std::string> Vst2Instance::parameterDisplay(uint32_t index)
@@ -161,7 +166,12 @@ Result<Manifest> Vst2Instance::inspect()
         dispatch(VST_EFFECT_OPCODE_EDITOR_GET_RECT, 0, 0, &rectangle);
         if (rectangle && rectangle->right > rectangle->left && rectangle->bottom > rectangle->top)
             manifest.editorSize = {static_cast<uint32_t>(rectangle->right - rectangle->left), static_cast<uint32_t>(rectangle->bottom - rectangle->top)};
-        return assignBindingIds(std::move(manifest));
+        auto programs = programInfo();
+        if (auto* failure = std::get_if<Failure>(&programs)) return *failure;
+        manifest.programs = std::get<ProgramInfo>(std::move(programs));
+        manifest = assignBindingIds(std::move(manifest));
+        binding = manifest;
+        return manifest;
     }
     catch (const std::exception& error) { return Failure{ErrorCode::plugin, error.what()}; }
 }
@@ -222,7 +232,8 @@ void Vst2Instance::suspend()
 Status Vst2Instance::process(AudioBlockView block, EventBlockView midi, const TransportSnapshot& transport)
 {
     if (!prepared || block.samples > config.maximumBlock || block.inputs.size() != static_cast<size_t>(effect->num_inputs)
-        || block.outputs.size() != static_cast<size_t>(effect->num_outputs) || midi.input.size() > 4096)
+        || block.outputs.size() != static_cast<size_t>(effect->num_outputs) || midi.input.size() > 4096
+        || effect->num_params != static_cast<int32_t>(parameterSequences.size()))
         return Failure{ErrorCode::plugin, "Source topology or processing bounds changed"};
     processing = this; processTransport = &transport; processEvents = &midi;
     publishTransport(transport);
@@ -270,6 +281,7 @@ Status Vst2Instance::process(AudioBlockView block, EventBlockView midi, const Tr
             }
         }
         if (events->count) dispatch(VST_EFFECT_OPCODE_EVENT, 0, 0, events.get());
+        if (block.samples) hasProcessed = true;
         std::array<float*, 256> nativeOutputs;
         std::copy(block.outputs.begin(), block.outputs.end(), nativeOutputs.begin());
         for (auto* output : block.outputs) std::fill_n(output, block.samples, 0.0f);
@@ -318,7 +330,7 @@ Status Vst2Instance::process(AudioBlockView block, EventBlockView midi, const Tr
 }
 void Vst2Instance::resetEvents()
 {
-    flushNotes = true;
+    flushNotes = hasProcessed;
     std::fill(dryDelay.begin(), dryDelay.end(), 0.0f);
     dryPosition = 0;
 }
@@ -422,9 +434,13 @@ intptr_t Vst2Instance::hostCall(int32_t opcode, int32_t index, intptr_t value, v
             return 1;
         case VST_HOST_OPCODE_PARAM_START_EDIT:
         case VST_HOST_OPCODE_PARAM_STOP_EDIT:
+            if (applyingParameter == this) return 1;
+            if (onNotification) onNotification({static_cast<uint32_t>(opcode), index, value, real});
+            return 1;
         case VST_HOST_OPCODE_IO_MODIFIED:
         case VST_HOST_OPCODE_EDITOR_RESIZE:
         case VST_HOST_OPCODE_EDITOR_UPDATE:
+            if (opcode == VST_HOST_OPCODE_EDITOR_UPDATE && applyingParameter == this) return 1;
             if (onNotification) onNotification({static_cast<uint32_t>(opcode), index, value, real});
             return 1;
         default: return 0;

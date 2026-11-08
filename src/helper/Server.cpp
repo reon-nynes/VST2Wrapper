@@ -109,7 +109,8 @@ private:
                 actual = std::get<Manifest>(std::move(inspected));
                 if (actual.sourceHash != expected.sourceHash || actual.sourceUniqueId != expected.sourceUniqueId
                     || actual.architecture != expected.architecture || actual.parameters.size() != expected.parameters.size()
-                    || actual.inputs.size() != expected.inputs.size() || actual.outputs.size() != expected.outputs.size())
+                    || actual.inputs.size() != expected.inputs.size() || actual.outputs.size() != expected.outputs.size()
+                    || (expected.schemaVersion >= 2 && actual.programs.names.size() != expected.programs.names.size()))
                     throw Failure{ErrorCode::identity, "Source plugin does not match embedded binding"};
                 activeGestures = std::make_unique<std::atomic<uint64_t>[]>(actual.parameters.size());
                 closedGestures.resize(actual.parameters.size());
@@ -149,12 +150,15 @@ private:
                     auto name = utf8Path(reader.text()).wstring();
                     ProcessConfig config;
                     config.parameterCount = static_cast<uint32_t>(actual.parameters.size());
+                    config.programCount = static_cast<uint32_t>(expected.programs.names.size());
                     config.sampleRate = reader.real64(); config.maximumBlock = reader.number<uint32_t>();
                     config.inputs = reader.number<uint32_t>(); config.outputs = reader.number<uint32_t>(); config.offline = reader.boolean();
                     reader.finish();
                     if (config.inputs != actual.inputs.size() || config.outputs != actual.outputs.size())
                         throw Failure{ErrorCode::invalidData, "Requested channels differ from source topology"};
                     audio.reset();
+                    auto saved = instance->captureState();
+                    if (auto* failure = std::get_if<Failure>(&saved)) throw *failure;
                     auto mapped = SharedAudio::open(name, config);
                     if (auto* failure = std::get_if<Failure>(&mapped)) throw *failure;
                     auto memory = std::get<std::unique_ptr<SharedAudio>>(std::move(mapped));
@@ -162,9 +166,12 @@ private:
                     sourceConfig.maximumBlock = memory->quantum;
                     auto prepared = instance->prepare(sourceConfig);
                     if (auto* failure = std::get_if<Failure>(&prepared)) throw *failure;
+                    auto restored = instance->restoreState(std::get<StateEnvelope>(saved));
+                    if (auto* failure = std::get_if<Failure>(&restored)) throw *failure;
                     audio = std::make_unique<AudioWorker>(std::move(memory), *instance, sourceMutex);
                     Writer writer;
                     writer.number(static_cast<uint32_t>(std::max(0, instance->native()->delay)));
+                    writer.floating(instance->tailSeconds());
                     response.payload = std::move(writer.bytes);
                     break;
                 }
@@ -174,7 +181,8 @@ private:
                     std::lock_guard lock(sourceMutex);
                     auto* effect = instance->native();
                     if (effect->num_inputs != static_cast<int32_t>(actual.inputs.size()) || effect->num_outputs != static_cast<int32_t>(actual.outputs.size())
-                        || effect->num_params != static_cast<int32_t>(actual.parameters.size()))
+                        || effect->num_params != static_cast<int32_t>(actual.parameters.size())
+                        || std::max(1, effect->num_programs) != static_cast<int32_t>(actual.programs.names.size()))
                     {
                         if (audio) audio->fail();
                         throw Failure{ErrorCode::unsupported, "Source topology changed. Reopen the same conversion to retry."};
@@ -232,6 +240,7 @@ private:
                     {
                         auto applied = instance->applyParameter(event);
                         if (auto* failure = std::get_if<Failure>(&applied)) throw *failure;
+                        if (audio) audio->acknowledge(event);
                     }
                     Writer writer;
                     writer.number(static_cast<uint32_t>(actual.parameters.size()));
@@ -249,6 +258,60 @@ private:
                     Writer writer;
                     writer.floating(instance->native()->get_parameter(instance->native(), index));
                     writer.text(std::get<std::string>(text)); response.payload = std::move(writer.bytes);
+                    break;
+                }
+                case ControlCommand::programs:
+                {
+                    std::lock_guard lock(sourceMutex);
+                    auto programs = instance->programInfo();
+                    if (auto* failure = std::get_if<Failure>(&programs)) throw *failure;
+                    response.payload = encodePrograms(std::get<ProgramInfo>(programs));
+                    break;
+                }
+                case ControlCommand::captureState:
+                {
+                    Reader reader(request.payload);
+                    auto count = reader.count(73729);
+                    std::vector<ParameterEvent> parameters;
+                    for (uint32_t i = 0; i < count; ++i)
+                        parameters.push_back({reader.number<uint32_t>(), 0, reader.real32(), reader.number<uint32_t>(), reader.number<uint64_t>()});
+                    reader.finish();
+                    std::sort(parameters.begin(), parameters.end(), [](const auto& a, const auto& b) { return a.sequence < b.sequence; });
+                    std::lock_guard lock(sourceMutex);
+                    for (const auto& parameter : parameters)
+                    {
+                        auto applied = instance->applyParameter(parameter);
+                        if (auto* failure = std::get_if<Failure>(&applied)) throw *failure;
+                        if (audio) audio->acknowledge(parameter);
+                    }
+                    auto snapshot = instance->captureState();
+                    if (auto* failure = std::get_if<Failure>(&snapshot)) throw *failure;
+                    response.payload = encodeState(std::get<StateEnvelope>(snapshot));
+                    break;
+                }
+                case ControlCommand::restoreState:
+                {
+                    Reader reader(request.payload);
+                    auto barrier = reader.number<uint64_t>();
+                    auto state = decodeState(reader.raw(reader.count(static_cast<uint32_t>(maximumStateBytes))));
+                    reader.finish();
+                    if (auto* failure = std::get_if<Failure>(&state)) throw *failure;
+                    std::lock_guard lock(sourceMutex);
+                    auto restored = instance->restoreState(std::get<StateEnvelope>(state), barrier);
+                    if (auto* failure = std::get_if<Failure>(&restored)) throw *failure;
+                    if (audio) audio->acknowledgeState(barrier);
+                    HostNotification old;
+                    for (uint32_t i = 0; i < 8192 && notifications->pop(old); ++i) {}
+                    closeGestures();
+                    auto programs = instance->programInfo();
+                    if (auto* failure = std::get_if<Failure>(&programs)) throw *failure;
+                    auto data = encodePrograms(std::get<ProgramInfo>(programs));
+                    Writer writer;
+                    writer.number(static_cast<uint32_t>(data.size())); writer.raw(data);
+                    writer.number(static_cast<uint32_t>(actual.parameters.size()));
+                    for (uint32_t i = 0; i < actual.parameters.size(); ++i) writer.floating(instance->native()->get_parameter(instance->native(), i));
+                    writer.number(static_cast<uint32_t>(std::max(0, instance->native()->delay))); writer.floating(instance->tailSeconds());
+                    response.payload = std::move(writer.bytes);
                     break;
                 }
                 default: throw Failure{ErrorCode::unsupported, "Unsupported helper command"};

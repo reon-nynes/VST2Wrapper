@@ -26,6 +26,12 @@ struct Instance
     CanonicalHost host = nullptr;
     uint32_t flags = 0;
     std::atomic<float> gain {0.5f};
+    std::atomic<uint32_t> currentProgram {0};
+    std::array<std::atomic<float>, 2> programGains {0.5f, 0.25f};
+    char programNames[2][32] {"Fixture A", "Fixture B"};
+    std::array<std::byte, 32> stateBlob;
+    bool stallCapture = false;
+    bool slowCapture = false;
     vst_rect_t rectangle {0, 0, 160, 320};
     HWND editor = nullptr;
     struct Note { int32_t offset; uint8_t status, data1, data2; };
@@ -56,6 +62,7 @@ static LRESULT CALLBACK editorProcedure(HWND window, UINT message, WPARAM wParam
         SetFocus(window);
         instance->host(&instance->effect, 43, 0, 0, nullptr, 0);
         instance->gain = instance->gain < 0.75f ? instance->gain + 0.25f : 0.0f;
+        instance->programGains[instance->currentProgram.load()] = instance->gain.load();
         instance->host(&instance->effect, 0, 0, 0, nullptr, instance->gain.load());
         instance->host(&instance->effect, 44, 0, 0, nullptr, 0);
         InvalidateRect(window, nullptr, TRUE);
@@ -87,6 +94,16 @@ static LRESULT CALLBACK editorProcedure(HWND window, UINT message, WPARAM wParam
         instance->host(&instance->effect, 0, 0, 0, nullptr, 0.65f);
         return 0;
     }
+    if (instance && message == WM_COMMAND && LOWORD(wParam) == 107)
+    {
+        instance->stallCapture = true;
+        return 0;
+    }
+    if (instance && message == WM_COMMAND && LOWORD(wParam) == 108)
+    {
+        instance->slowCapture = true;
+        return 0;
+    }
     if (instance && message == WM_PAINT)
     {
         PAINTSTRUCT paint;
@@ -104,7 +121,7 @@ static LRESULT CALLBACK editorProcedure(HWND window, UINT message, WPARAM wParam
     return DefWindowProcW(window, message, wParam, lParam);
 }
 
-static intptr_t __cdecl control(vst_effect_t* effect, int32_t opcode, int32_t index, intptr_t, void* pointer, float)
+static intptr_t __cdecl control(vst_effect_t* effect, int32_t opcode, int32_t index, intptr_t value, void* pointer, float)
 {
     auto& instance = *static_cast<Instance*>(effect->effect_internal);
     switch (opcode)
@@ -112,7 +129,51 @@ static intptr_t __cdecl control(vst_effect_t* effect, int32_t opcode, int32_t in
         case VST_EFFECT_OPCODE_CREATE: ++counters.opens; return 1;
         case VST_EFFECT_OPCODE_DESTROY: ++counters.closes; delete &instance; return 1;
         case VST_EFFECT_OPCODE_EFFECT_NAME:
-            return copyText(pointer, (instance.flags & 16) ? "Nytera MIDI Fixture" : (instance.flags & 128) ? "Nytera Delay Fixture" : "Nytera Fixture");
+            return copyText(pointer, (instance.flags & 16) ? "Nytera MIDI Fixture" : (instance.flags & 128) ? "Nytera Delay Fixture"
+                : (instance.flags & 8) ? "Nytera Chunk Fixture" : (instance.flags & 2048) ? "Nytera Program Fixture" : "Nytera Fixture");
+        case VST_EFFECT_OPCODE_PROGRAM_GET: return instance.currentProgram.load();
+        case VST_EFFECT_OPCODE_PROGRAM_SET:
+            if (value < 0 || value >= effect->num_programs) return 0;
+            instance.currentProgram = static_cast<uint32_t>(value);
+            instance.gain = instance.programGains[static_cast<size_t>(value)].load();
+            instance.host(effect, 0, 0, 0, nullptr, instance.gain.load());
+            return 1;
+        case VST_EFFECT_OPCODE_PROGRAM_GET_NAME: return copyText(pointer, instance.programNames[instance.currentProgram.load()]);
+        case VST_EFFECT_OPCODE_PROGRAM_SET_NAME:
+            std::strncpy(instance.programNames[instance.currentProgram.load()], static_cast<const char*>(pointer), 31);
+            instance.programNames[instance.currentProgram.load()][31] = 0;
+            return 1;
+        case 29:
+            return value >= 0 && value < effect->num_programs ? copyText(pointer, instance.programNames[value]) : 0;
+        case VST_EFFECT_OPCODE_SUSPEND_RESUME:
+            if (value && (instance.flags & 8192)) instance.gain = 0.5f;
+            return 1;
+        case VST_EFFECT_OPCODE_GET_CHUNK_DATA:
+        {
+            if (!(instance.flags & 8)) return 0;
+            if (instance.stallCapture) Sleep(INFINITE);
+            if (instance.slowCapture) Sleep(100);
+            if (index == 0 && (instance.flags & 16384)) return 0;
+            instance.stateBlob.fill(std::byte{0xa5});
+            uint32_t magic = 0x4346594e, program = instance.currentProgram.load();
+            float gain = instance.gain.load();
+            std::memcpy(instance.stateBlob.data(), &magic, 4);
+            std::memcpy(instance.stateBlob.data() + 4, &gain, 4);
+            std::memcpy(instance.stateBlob.data() + 8, &program, 4);
+            *static_cast<void**>(pointer) = instance.stateBlob.data();
+            return instance.stateBlob.size();
+        }
+        case VST_EFFECT_OPCODE_SET_CHUNK_DATA:
+        {
+            if (value != instance.stateBlob.size() || !pointer) return -1;
+            uint32_t magic, program;
+            float gain;
+            auto* bytes = static_cast<const std::byte*>(pointer);
+            std::memcpy(&magic, bytes, 4); std::memcpy(&gain, bytes + 4, 4); std::memcpy(&program, bytes + 8, 4);
+            if (magic != 0x4346594e || program >= static_cast<uint32_t>(effect->num_programs)) return -1;
+            instance.currentProgram = program; instance.gain = gain; instance.programGains[program] = gain;
+            return 1;
+        }
         case VST_EFFECT_OPCODE_VENDOR_NAME: return copyText(pointer, "Nytera");
         case VST_EFFECT_OPCODE_PARAM_NAME: return copyText(pointer, index == 0 ? "Gain" : "Mode");
         case VST_EFFECT_OPCODE_PARAM_LABEL: return copyText(pointer, "");
@@ -205,6 +266,7 @@ static void __cdecl setParameter(vst_effect_t* effect, uint32_t, float value)
 {
     auto* instance = static_cast<Instance*>(effect->effect_internal);
     instance->gain = value;
+    instance->programGains[instance->currentProgram.load()] = value;
     instance->host(effect, 0, 0, 0, nullptr, value);
 }
 static float __cdecl getParameter(vst_effect_t* effect, uint32_t)
@@ -227,11 +289,12 @@ extern "C" __declspec(dllexport) vst_effect_t* VSTPluginMain(CanonicalHost host)
     effect.process_float = process;
     effect.set_parameter = setParameter;
     effect.get_parameter = getParameter;
-    effect.num_programs = 1;
-    effect.num_params = 1;
+    effect.num_programs = (options & 2048) ? 2 : 1;
+    effect.num_params = (options & 32768) ? 9000 : 1;
     effect.num_inputs = (options & 16) ? 0 : 2;
     effect.num_outputs = 2;
-    effect.flags = VST_EFFECT_FLAG_SUPPORTS_FLOAT | ((options & 1) ? 0 : VST_EFFECT_FLAG_EDITOR) | ((options & 16) ? VST_EFFECT_FLAG_INSTRUMENT : 0);
+    effect.flags = VST_EFFECT_FLAG_SUPPORTS_FLOAT | ((options & 1) ? 0 : VST_EFFECT_FLAG_EDITOR)
+        | ((options & 16) ? VST_EFFECT_FLAG_INSTRUMENT : 0) | ((options & 8) ? VST_EFFECT_FLAG_CHUNKS : 0);
     effect.delay = (options & 128) ? 16 : 0;
     effect.effect_internal = instance;
     effect.unique_id = 0x4e795431;

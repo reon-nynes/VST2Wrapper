@@ -56,6 +56,12 @@ void AudioWorker::run(std::stop_token token)
         };
         {
             std::lock_guard lock(sourceMutex);
+            if (slot.generation != static_cast<uint32_t>(InterlockedCompareExchange(&memory->header().generation, 0, 0)))
+            {
+                InterlockedExchange(&slot.state, 3);
+                SetEvent(memory->doneEvent());
+                continue;
+            }
             if (lastGeneration != 0 && lastGeneration != slot.generation) source.resetEvents();
             bool changed = lastGeneration != slot.generation;
             lastGeneration = slot.generation;
@@ -69,8 +75,10 @@ void AudioWorker::run(std::stop_token token)
                 source.publishTransport(snapshot);
                 while (parameterIndex < parameters.count && parameters.events[parameterIndex].offset == start)
                 {
-                    auto applied = source.applyParameter(parameters.events[parameterIndex++]);
+                    const auto& event = parameters.events[parameterIndex++];
+                    auto applied = source.applyParameter(event);
                     if (std::holds_alternative<Failure>(applied)) { slot.error = 1; InterlockedExchange(&memory->header().error, 1); }
+                    else memory->acknowledge(event);
                 }
                 if (slot.error) break;
                 uint32_t end = memory->quantum;

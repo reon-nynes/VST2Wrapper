@@ -6,6 +6,7 @@
 #include <bcrypt.h>
 #include <mutex>
 #include <atomic>
+#include <cmath>
 namespace nytera
 {
 struct BridgeClient::Impl
@@ -17,6 +18,48 @@ struct BridgeClient::Impl
     std::atomic<uint32_t> editorWidth {480}, editorHeight {320};
     std::atomic<uint32_t> totalLatency {0};
     std::atomic<uint32_t> pipelineLatency {0};
+    std::atomic<double> tail {0};
+    std::atomic<bool> ready {false}, maintenance {false};
+    std::atomic<uint32_t> activeCallbacks {0};
+    std::atomic<uint64_t> skippedSamples {0};
+    std::timed_mutex stateOperations;
+    std::mutex snapshots;
+    std::optional<Manifest> binding;
+    std::optional<StateEnvelope> completeState, pendingState;
+    uint64_t pendingBarrier = 0, stateBarrier = 0, completeBarrier = 0;
+    struct Resume
+    {
+        Impl& owner;
+        ~Resume() { owner.maintenance = false; }
+    };
+    bool pause(std::chrono::milliseconds timeout)
+    {
+        maintenance = true;
+        auto deadline = std::chrono::steady_clock::now() + timeout;
+        while (activeCallbacks.load() != 0)
+        {
+            if (std::chrono::steady_clock::now() >= deadline) return false;
+            Sleep(1);
+        }
+        return true;
+    }
+    template<class Block> ProcessResult render(Block block, EventBlockView events, const TransportSnapshot& transport) noexcept
+    {
+        auto silence = [&](ProcessResult result)
+        {
+            for (auto* output : block.outputs) if (output) std::fill_n(output, block.samples, 0);
+            return result;
+        };
+        if (maintenance.load()) { skippedSamples.fetch_add(block.samples); return silence(ProcessResult::priming); }
+        activeCallbacks.fetch_add(1);
+        struct Finish { std::atomic<uint32_t>& count; ~Finish() { count.fetch_sub(1); } } finish {activeCallbacks};
+        if (maintenance.load()) { skippedSamples.fetch_add(block.samples); return silence(ProcessResult::priming); }
+        if (!audio) return silence(ProcessResult::failed);
+        auto skipped = skippedSamples.exchange(0);
+        if (skipped) audio->skipSamples(skipped);
+        collectParameters(events);
+        return audio->process(block, events, transport);
+    }
     std::unique_ptr<AudioTransport> audio;
     uint32_t audioGeneration = 0;
     std::unique_ptr<BoundedQueue<ParameterEvent, 8192>> parameterQueue = std::make_unique<BoundedQueue<ParameterEvent, 8192>>();
@@ -63,11 +106,25 @@ BridgeClient::BridgeClient() : impl(std::make_unique<Impl>()) { impl->parameterS
 BridgeClient::~BridgeClient() { stop(); }
 Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path& helper, const std::filesystem::path& source)
 {
+    {
+        std::lock_guard snapshotLock(impl->snapshots);
+        if (impl->binding && (impl->binding->conversionId != manifest.conversionId || impl->binding->sourceHash != manifest.sourceHash))
+            return Failure{ErrorCode::identity, "An instance cannot switch its bound source DLL"};
+        if (impl->pendingState)
+        {
+            auto valid = validateStateBinding(*impl->pendingState, manifest);
+            if (auto* failure = std::get_if<Failure>(&valid)) return *failure;
+        }
+        impl->binding = manifest;
+    }
     stop();
+    std::unique_lock stateOperation(impl->stateOperations);
     std::unique_lock lock(impl->mutex);
     try
     {
         impl->totalLatency = manifest.initialDelay;
+        impl->pipelineLatency = 0;
+        impl->tail = manifest.tailSeconds;
         impl->parameterCount = static_cast<uint32_t>(manifest.parameters.size());
         Id128 random;
         if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(random.data()), static_cast<ULONG>(random.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
@@ -108,10 +165,29 @@ Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path
         handshake.raw(binding);
         auto response = impl->exchange(ControlCommand::hello, handshake.bytes, std::chrono::seconds(60));
         if (auto* failure = std::get_if<Failure>(&response)) throw std::runtime_error(failure->message);
-        return std::monostate{};
+        lock.unlock();
+        for (int attempt = 0; attempt < 8; ++attempt)
+        {
+            std::optional<StateEnvelope> pending;
+            uint64_t barrier = 0;
+            {
+                std::lock_guard snapshotLock(impl->snapshots);
+                pending = impl->pendingState; barrier = impl->pendingBarrier;
+                if (!pending) { impl->ready = true; return std::monostate{}; }
+            }
+            auto restored = applyState(*pending, barrier, std::chrono::seconds(10));
+            if (auto* failure = std::get_if<Failure>(&restored)) throw std::runtime_error(failure->message);
+            {
+                std::lock_guard snapshotLock(impl->snapshots);
+                if (impl->pendingBarrier == barrier) impl->pendingState.reset();
+            }
+        }
+        throw std::runtime_error("State requests did not settle during startup");
     }
     catch (const std::exception& error)
     {
+        if (!lock.owns_lock()) lock.lock();
+        impl->ready = false;
         impl->control.reset();
         impl->job.reset();
         if (impl->process.valid()) WaitForSingleObject(impl->process.get(), 2000);
@@ -129,6 +205,7 @@ Result<Bytes> BridgeClient::request(ControlCommand command, std::span<const std:
 }
 void BridgeClient::stop() noexcept
 {
+    impl->ready = false;
     try
     {
         std::unique_lock lock(impl->mutex);
@@ -193,6 +270,10 @@ Status BridgeClient::prepare(const ProcessConfig& requested)
 {
     auto config = requested;
     config.parameterCount = impl->parameterCount;
+    { std::lock_guard lock(impl->snapshots); if (impl->binding) config.programCount = static_cast<uint32_t>(impl->binding->programs.names.size()); }
+    if (impl->audio)
+        for (auto event : impl->audio->parameterCheckpoint())
+            if (!impl->parameterQueue->push(event)) impl->parameterOverflow = true;
     auto name = L"Local\\NyteraAudio-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(impl->pid.load())
         + L"-" + std::to_wstring(++impl->audioGeneration);
     auto created = AudioTransport::create(name, config);
@@ -207,27 +288,27 @@ Status BridgeClient::prepare(const ProcessConfig& requested)
     {
         Reader response(std::get<Bytes>(connected));
         auto sourceLatency = response.number<uint32_t>();
+        auto tail = response.real64();
         response.finish();
         impl->totalLatency = audio->latency() + sourceLatency;
         impl->pipelineLatency = audio->latency();
+        impl->tail = tail;
         impl->audio = std::move(audio);
+        {
+            std::lock_guard lock(impl->snapshots);
+            if (impl->completeState) impl->audio->restoreCheckpoint(impl->completeState->program, impl->completeState->parameters, impl->completeBarrier);
+        }
         return std::monostate{};
     }
     catch (const std::exception& error) { return Failure{ErrorCode::invalidData, error.what()}; }
 }
 ProcessResult BridgeClient::process(AudioBlockView block, EventBlockView events, const TransportSnapshot& transport) noexcept
 {
-    impl->collectParameters(events);
-    if (impl->audio) return impl->audio->process(block, events, transport);
-    for (auto* output : block.outputs) std::fill_n(output, block.samples, 0.0f);
-    return ProcessResult::failed;
+    return impl->render(block, events, transport);
 }
 ProcessResult BridgeClient::process(DoubleAudioBlockView block, EventBlockView events, const TransportSnapshot& transport) noexcept
 {
-    impl->collectParameters(events);
-    if (impl->audio) return impl->audio->process(block, events, transport);
-    for (auto* output : block.outputs) std::fill_n(output, block.samples, 0.0);
-    return ProcessResult::failed;
+    return impl->render(block, events, transport);
 }
 uint32_t BridgeClient::latencySamples() const noexcept { return impl->totalLatency.load(); }
 void BridgeClient::enqueueParameter(const ParameterEvent& event) noexcept
@@ -287,4 +368,112 @@ Status BridgeClient::releaseAudio()
     return std::monostate{};
 }
 void BridgeClient::resetProcessing() noexcept { if (impl->audio) impl->audio->reset(); }
+Result<StateEnvelope> BridgeClient::captureState(std::chrono::milliseconds timeout)
+{
+    if (!impl->ready)
+    {
+        if (auto cached = lastState()) return *cached;
+        return Failure{ErrorCode::disconnected, "Source state is unavailable before startup"};
+    }
+    std::unique_lock operation(impl->stateOperations, std::defer_lock);
+    if (!operation.try_lock_for(timeout)) return Failure{ErrorCode::timeout, "Another state operation is pending"};
+    auto checkpointSequence = ++impl->parameterSequence;
+    Impl::Resume resume {*impl};
+    if (!impl->pause(timeout)) return Failure{ErrorCode::timeout, "Audio processing did not reach a state boundary"};
+    try
+    {
+        auto pending = impl->audio ? impl->audio->parameterCheckpoint() : std::vector<ParameterEvent>{};
+        ParameterEvent event;
+        for (uint32_t i = 0; i < 8192 && impl->parameterQueue->pop(event); ++i) pending.push_back(event);
+        Writer writer;
+        writer.number(static_cast<uint32_t>(pending.size()));
+        for (const auto& parameter : pending)
+        {
+            writer.number(parameter.index); writer.floating(parameter.normalized);
+            writer.number(parameter.origin); writer.number(parameter.sequence);
+        }
+        auto response = request(ControlCommand::captureState, writer.bytes, timeout);
+        if (auto* failure = std::get_if<Failure>(&response)) return *failure;
+        auto decoded = decodeState(std::get<Bytes>(response));
+        if (auto* failure = std::get_if<Failure>(&decoded)) return *failure;
+        auto state = std::get<StateEnvelope>(std::move(decoded));
+        std::lock_guard lock(impl->snapshots);
+        auto valid = validateStateBinding(state, *impl->binding);
+        if (auto* failure = std::get_if<Failure>(&valid)) return *failure;
+        impl->completeState = state;
+        impl->completeBarrier = checkpointSequence;
+        return state;
+    }
+    catch (const std::exception& error) { return Failure{ErrorCode::invalidData, error.what()}; }
+}
+Status BridgeClient::applyState(const StateEnvelope& state, uint64_t barrier, std::chrono::milliseconds timeout)
+{
+    if (barrier < impl->stateBarrier) return std::monostate{};
+    try
+    {
+        auto bytes = encodeState(state);
+        Writer writer;
+        writer.number(barrier); writer.number(static_cast<uint32_t>(bytes.size())); writer.raw(bytes);
+        auto response = request(ControlCommand::restoreState, writer.bytes, timeout);
+        if (auto* failure = std::get_if<Failure>(&response)) return *failure;
+        Reader reader(std::get<Bytes>(response));
+        auto programs = decodePrograms(reader.raw(reader.count(16 * 1024 * 1024)));
+        if (auto* failure = std::get_if<Failure>(&programs)) return *failure;
+        auto restored = state;
+        restored.program = std::get<ProgramInfo>(programs).current;
+        restored.programName = std::get<ProgramInfo>(programs).names[restored.program].substr(0, 23);
+        auto count = reader.count(65536);
+        if (count != state.parameters.size()) throw std::runtime_error("Restored parameter topology differs from saved state");
+        restored.parameters.clear();
+        for (uint32_t i = 0; i < count; ++i) restored.parameters.push_back(reader.real32());
+        auto latency = reader.number<uint32_t>(); auto tail = reader.real64(); reader.finish();
+        validateState(restored);
+        impl->totalLatency = impl->pipelineLatency.load() + latency; impl->tail = tail;
+        if (impl->audio) impl->audio->restoreCheckpoint(restored.program, restored.parameters, barrier);
+        impl->stateBarrier = barrier;
+        std::lock_guard lock(impl->snapshots);
+        impl->completeState = std::move(restored);
+        impl->completeBarrier = barrier;
+        return std::monostate{};
+    }
+    catch (const std::exception& error) { return Failure{ErrorCode::invalidData, error.what()}; }
+}
+Status BridgeClient::restoreState(const StateEnvelope& state)
+{
+    try { validateState(state); }
+    catch (const std::exception& error) { return Failure{ErrorCode::invalidData, error.what()}; }
+    auto barrier = ++impl->parameterSequence;
+    {
+        std::lock_guard lock(impl->snapshots);
+        if (impl->binding)
+        {
+            auto valid = validateStateBinding(state, *impl->binding);
+            if (auto* failure = std::get_if<Failure>(&valid)) return *failure;
+        }
+        if (!impl->ready)
+        {
+            impl->pendingState = state; impl->pendingBarrier = barrier;
+            return std::monostate{};
+        }
+    }
+    std::unique_lock operation(impl->stateOperations, std::defer_lock);
+    if (!operation.try_lock_for(std::chrono::seconds(10))) return Failure{ErrorCode::timeout, "Another state operation is pending"};
+    Impl::Resume resume {*impl};
+    if (!impl->pause(std::chrono::seconds(10))) return Failure{ErrorCode::timeout, "Audio processing did not reach a state boundary"};
+    if (impl->audio) impl->audio->reset();
+    return applyState(state, barrier, std::chrono::seconds(10));
+}
+std::optional<StateEnvelope> BridgeClient::lastState() const
+{
+    std::lock_guard lock(impl->snapshots);
+    if (impl->pendingState) return impl->pendingState;
+    return impl->completeState;
+}
+Result<ProgramInfo> BridgeClient::programInfo()
+{
+    auto response = request(ControlCommand::programs, {}, std::chrono::seconds(2));
+    if (auto* failure = std::get_if<Failure>(&response)) return *failure;
+    return decodePrograms(std::get<Bytes>(response));
+}
+double BridgeClient::tailLengthSeconds() const noexcept { return impl->tail.load(); }
 }

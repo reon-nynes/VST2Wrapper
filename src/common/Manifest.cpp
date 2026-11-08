@@ -5,6 +5,30 @@
 #include <set>
 namespace nytera
 {
+Bytes encodePrograms(const ProgramInfo& info)
+{
+    if (info.names.empty() || info.names.size() > 4096 || info.current >= info.names.size()) throw std::runtime_error("Invalid program metadata");
+    Writer writer;
+    writer.number(info.current); writer.number(static_cast<uint32_t>(info.names.size()));
+    for (const auto& name : info.names) writer.text(name);
+    return std::move(writer.bytes);
+}
+Result<ProgramInfo> decodePrograms(std::span<const std::byte> bytes)
+{
+    try
+    {
+        Reader reader(bytes);
+        ProgramInfo info;
+        info.current = reader.number<uint32_t>();
+        auto count = reader.count(4096);
+        if (!count || info.current >= count) throw std::runtime_error("Invalid program metadata");
+        info.names.clear();
+        for (uint32_t i = 0; i < count; ++i) info.names.push_back(reader.text());
+        reader.finish();
+        return info;
+    }
+    catch (const std::exception& error) { return Failure{ErrorCode::invalidData, error.what()}; }
+}
 Result<Architecture> inspectPeArchitecture(const std::filesystem::path& path)
 {
     try
@@ -72,6 +96,12 @@ Bytes encodeManifest(const Manifest& manifest)
         writer.number(entry.size);
         writer.number(entry.resourceId);
     }
+    if (manifest.schemaVersion >= 2)
+    {
+        writer.number(manifest.programs.current);
+        writer.number(static_cast<uint32_t>(manifest.programs.names.size()));
+        for (const auto& name : manifest.programs.names) writer.text(name);
+    }
     return std::move(writer.bytes);
 }
 
@@ -83,7 +113,7 @@ Result<Manifest> decodeManifest(std::span<const std::byte> data)
         if (reader.number<uint32_t>() != 0x314d594e) throw std::runtime_error("Invalid manifest signature");
         Manifest manifest;
         manifest.schemaVersion = reader.number<uint32_t>();
-        if (manifest.schemaVersion != 1) throw std::runtime_error("Unsupported manifest version");
+        if (manifest.schemaVersion != 1 && manifest.schemaVersion != 2) throw std::runtime_error("Unsupported manifest version");
         manifest.conversionId = reader.array<16>();
         manifest.processorId = reader.array<16>();
         manifest.controllerId = reader.array<16>();
@@ -137,6 +167,14 @@ Result<Manifest> decodeManifest(std::span<const std::byte> data)
             entry.size = reader.number<uint64_t>();
             entry.resourceId = reader.number<uint32_t>();
             manifest.payloads.push_back(std::move(entry));
+        }
+        if (manifest.schemaVersion >= 2)
+        {
+            manifest.programs.current = reader.number<uint32_t>();
+            auto count = reader.count(4096);
+            if (count == 0 || manifest.programs.current >= count) throw std::runtime_error("Invalid program metadata");
+            manifest.programs.names.clear();
+            for (uint32_t i = 0; i < count; ++i) manifest.programs.names.push_back(reader.text());
         }
         reader.finish();
         return manifest;

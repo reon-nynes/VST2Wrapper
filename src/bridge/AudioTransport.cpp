@@ -39,7 +39,9 @@ bool SharedParameters::push(ParameterEvent event) noexcept
 {
     if (count >= events.size()) return false;
     uint32_t index = count;
-    while (index > 0 && events[index - 1].offset > event.offset) { events[index] = events[index - 1]; --index; }
+    while (index > 0 && (events[index - 1].offset > event.offset
+        || (events[index - 1].offset == event.offset && events[index - 1].sequence > event.sequence)))
+    { events[index] = events[index - 1]; --index; }
     events[index] = event;
     ++count;
     return true;
@@ -49,14 +51,15 @@ bool SharedParameters::valid(uint32_t quantum) const noexcept
     if (count > events.size()) return false;
     for (uint32_t i = 0; i < count; ++i)
         if (events[i].offset >= quantum || !std::isfinite(events[i].normalized) || events[i].normalized < 0 || events[i].normalized > 1
-            || (events[i].origin != 1 && events[i].origin != 2) || (i > 0 && events[i - 1].offset > events[i].offset)) return false;
+            || events[i].origin < 1 || events[i].origin > 4 || (i > 0 && events[i - 1].offset > events[i].offset)) return false;
     return true;
 }
 SharedAudio::SharedAudio(std::wstring name, ProcessConfig config)
     : config(config), quantum(std::bit_ceil(config.maximumBlock)), name(std::move(name))
 {
     if (!std::isfinite(config.sampleRate) || config.sampleRate < 1000 || config.sampleRate > 768000
-        || config.maximumBlock == 0 || config.maximumBlock > 65536 || config.inputs > 256 || config.outputs > 256 || config.parameterCount > 65536)
+        || config.maximumBlock == 0 || config.maximumBlock > 65536 || config.inputs > 256 || config.outputs > 256 || config.parameterCount > 65536
+        || config.programCount == 0 || config.programCount > 4096)
         throw std::runtime_error("Invalid audio transport configuration");
     inputOffset = sizeof(AudioSlotHeader);
     outputOffset = inputOffset + size_t(config.inputs) * quantum * sizeof(float);
@@ -65,7 +68,8 @@ SharedAudio::SharedAudio(std::wstring name, ProcessConfig config)
     transportOffset = outputMidiOffset + sizeof(SharedMidi);
     parameterOffset = transportOffset + sizeof(SharedTransport);
     slotBytes = alignUp(parameterOffset + sizeof(SharedParameters), 64);
-    totalBytes = sizeof(SharedAudioHeader) + audioSlotCount * slotBytes;
+    slotOffset = alignUp(sizeof(SharedAudioHeader) + config.parameterCount * sizeof(LONG64), 64);
+    totalBytes = slotOffset + audioSlotCount * slotBytes;
     if (totalBytes > 256 * 1024 * 1024) throw std::runtime_error("Audio transport exceeds 256 MiB capacity");
 }
 Result<std::unique_ptr<SharedAudio>> SharedAudio::map(const std::wstring& name, const ProcessConfig& config, bool creating)
@@ -93,13 +97,15 @@ Result<std::unique_ptr<SharedAudio>> SharedAudio::map(const std::wstring& name, 
         {
             std::memset(result->view, 0, result->totalBytes);
             auto& header = result->header();
-            header.magic = 0x4154594e; header.version = 4; header.quantum = result->quantum;
+            header.magic = 0x4154594e; header.version = 6; header.quantum = result->quantum;
             header.inputs = config.inputs; header.outputs = config.outputs; header.slots = audioSlotCount; header.generation = 1;
             header.parameterCount = config.parameterCount;
+            header.programCount = config.programCount;
         }
         auto& header = result->header();
-        if (header.magic != 0x4154594e || header.version != 4 || header.quantum != result->quantum
-            || header.inputs != config.inputs || header.outputs != config.outputs || header.slots != audioSlotCount || header.parameterCount != config.parameterCount)
+        if (header.magic != 0x4154594e || header.version != 6 || header.quantum != result->quantum
+            || header.inputs != config.inputs || header.outputs != config.outputs || header.slots != audioSlotCount
+            || header.parameterCount != config.parameterCount || header.programCount != config.programCount)
             throw std::runtime_error("Incompatible audio mapping layout");
         return result;
     }
@@ -108,13 +114,42 @@ Result<std::unique_ptr<SharedAudio>> SharedAudio::map(const std::wstring& name, 
 Result<std::unique_ptr<SharedAudio>> SharedAudio::create(const std::wstring& name, const ProcessConfig& config) { return map(name, config, true); }
 Result<std::unique_ptr<SharedAudio>> SharedAudio::open(const std::wstring& name, const ProcessConfig& config) { return map(name, config, false); }
 SharedAudio::~SharedAudio() { if (view) UnmapViewOfFile(view); }
-AudioSlotHeader& SharedAudio::slot(uint32_t index) const { return *reinterpret_cast<AudioSlotHeader*>(static_cast<std::byte*>(view) + sizeof(SharedAudioHeader) + index * slotBytes); }
+AudioSlotHeader& SharedAudio::slot(uint32_t index) const { return *reinterpret_cast<AudioSlotHeader*>(static_cast<std::byte*>(view) + slotOffset + index * slotBytes); }
 float* SharedAudio::input(uint32_t index, uint32_t channel) const { return reinterpret_cast<float*>(reinterpret_cast<std::byte*>(&slot(index)) + inputOffset) + size_t(channel) * quantum; }
 float* SharedAudio::output(uint32_t index, uint32_t channel) const { return reinterpret_cast<float*>(reinterpret_cast<std::byte*>(&slot(index)) + outputOffset) + size_t(channel) * quantum; }
 SharedMidi& SharedAudio::inputMidi(uint32_t index) const { return *reinterpret_cast<SharedMidi*>(reinterpret_cast<std::byte*>(&slot(index)) + inputMidiOffset); }
 SharedMidi& SharedAudio::outputMidi(uint32_t index) const { return *reinterpret_cast<SharedMidi*>(reinterpret_cast<std::byte*>(&slot(index)) + outputMidiOffset); }
 SharedTransport& SharedAudio::transportMarkers(uint32_t index) const { return *reinterpret_cast<SharedTransport*>(reinterpret_cast<std::byte*>(&slot(index)) + transportOffset); }
 SharedParameters& SharedAudio::parameters(uint32_t index) const { return *reinterpret_cast<SharedParameters*>(reinterpret_cast<std::byte*>(&slot(index)) + parameterOffset); }
+uint64_t SharedAudio::parameterSequence(uint32_t index) const
+{
+    auto* sequences = reinterpret_cast<volatile LONG64*>(static_cast<std::byte*>(view) + sizeof(SharedAudioHeader));
+    return static_cast<uint64_t>(InterlockedCompareExchange64(&sequences[index], 0, 0));
+}
+uint64_t SharedAudio::programSequence() const { return static_cast<uint64_t>(InterlockedCompareExchange64(&header().programSequence, 0, 0)); }
+static void acknowledgeSequence(volatile LONG64& target, uint64_t sequence)
+{
+    auto previous = InterlockedCompareExchange64(&target, 0, 0);
+    while (sequence > static_cast<uint64_t>(previous))
+    {
+        auto observed = InterlockedCompareExchange64(&target, static_cast<LONG64>(sequence), previous);
+        if (observed == previous) break;
+        previous = observed;
+    }
+}
+void SharedAudio::acknowledge(const ParameterEvent& event) const
+{
+    if (event.origin >= 3) { acknowledgeSequence(header().programSequence, event.sequence); return; }
+    if (event.index >= config.parameterCount) return;
+    auto* sequences = reinterpret_cast<volatile LONG64*>(static_cast<std::byte*>(view) + sizeof(SharedAudioHeader));
+    acknowledgeSequence(sequences[event.index], event.sequence);
+}
+void SharedAudio::acknowledgeState(uint64_t sequence) const
+{
+    acknowledgeSequence(header().programSequence, sequence);
+    auto* sequences = reinterpret_cast<volatile LONG64*>(static_cast<std::byte*>(view) + sizeof(SharedAudioHeader));
+    for (uint32_t index = 0; index < config.parameterCount; ++index) acknowledgeSequence(sequences[index], sequence);
+}
 
 AudioTransport::AudioTransport(std::unique_ptr<SharedAudio> shared)
     : memory(std::move(shared)), midiScratch(std::make_unique<SharedMidi>()), transportScratch(std::make_unique<SharedTransport>()),
@@ -141,8 +176,14 @@ void AudioTransport::reset() noexcept
     midiScratch->count = midiScratch->used = 0;
     transportScratch->count = 0;
     parameterScratch->count = 0;
+    if (programEvent && (!programEvent->sequence || programEvent->sequence > memory->programSequence()))
+    {
+        auto event = *programEvent; event.offset = 0; event.origin = 4;
+        if (!parameterScratch->push(event)) InterlockedExchange(&memory->header().error, 1);
+    }
     for (uint32_t index = 0; index < parameterSeen.size(); ++index)
-        if (parameterSeen[index] && !parameterScratch->push({index, 0, parameterValues[index], 2, parameterSequences[index]}))
+        if (parameterSeen[index] && (!parameterSequences[index] || parameterSequences[index] > memory->parameterSequence(index))
+            && !parameterScratch->push({index, 0, parameterValues[index], 2, parameterSequences[index]}))
             InterlockedExchange(&memory->header().error, 1);
     outputSequence = UINT64_MAX;
     outputSlot = -1;
@@ -240,8 +281,15 @@ ProcessResult AudioTransport::process(AudioBlockView block, EventBlockView event
         if (event.sample < clock || event.sample >= clock + std::max<uint32_t>(block.samples, 1)) return mute();
     for (const auto& event : events.parameters)
     {
-        if (event.index >= parameterValues.size() || event.offset >= std::max<uint32_t>(block.samples, 1)
-            || !std::isfinite(event.normalized) || event.normalized < 0 || event.normalized > 1 || (event.origin != 1 && event.origin != 2)) return mute();
+        if (event.offset >= std::max<uint32_t>(block.samples, 1) || !std::isfinite(event.normalized) || event.normalized < 0
+            || event.normalized > 1 || event.origin < 1 || event.origin > 4) return mute();
+        if (event.origin >= 3)
+        {
+            if (event.index >= memory->config.programCount || event.normalized != 0) return mute();
+            if (!programEvent || !event.sequence || event.sequence >= programEvent->sequence) programEvent = event;
+            continue;
+        }
+        if (event.index >= parameterValues.size()) return mute();
         if (!event.sequence || event.sequence >= parameterSequences[event.index])
         {
             parameterValues[event.index] = event.normalized;
@@ -370,5 +418,30 @@ ProcessResult AudioTransport::process(DoubleAudioBlockView block, EventBlockView
     for (uint32_t channel = 0; channel < memory->config.outputs; ++channel)
         for (uint32_t i = 0; i < block.samples; ++i) block.outputs[channel][i] = outputs[channel][i];
     return result;
+}
+std::vector<ParameterEvent> AudioTransport::parameterCheckpoint() const
+{
+    std::vector<ParameterEvent> checkpoint;
+    if (programEvent && (!programEvent->sequence || programEvent->sequence > memory->programSequence()))
+    { auto event = *programEvent; event.offset = 0; event.origin = 4; checkpoint.push_back(event); }
+    for (uint32_t index = 0; index < parameterSeen.size(); ++index)
+        if (parameterSeen[index] && (!parameterSequences[index] || parameterSequences[index] > memory->parameterSequence(index)))
+            checkpoint.push_back({index, 0, parameterValues[index], 2, parameterSequences[index]});
+    return checkpoint;
+}
+void AudioTransport::skipSamples(uint64_t count) noexcept
+{
+    clock += static_cast<int64_t>(count);
+    reset();
+}
+void AudioTransport::restoreCheckpoint(uint32_t program, std::span<const float> values, uint64_t sequence)
+{
+    if (values.size() != parameterValues.size()) throw std::runtime_error("Restored parameter count differs from adapter topology");
+    std::copy(values.begin(), values.end(), parameterValues.begin());
+    std::fill(parameterSeen.begin(), parameterSeen.end(), uint8_t{1});
+    std::fill(parameterSequences.begin(), parameterSequences.end(), sequence);
+    if (program < memory->config.programCount) programEvent = ParameterEvent{program, 0, 0, 4, sequence};
+    parameterScratch->count = 0;
+    memory->acknowledgeState(sequence);
 }
 }
