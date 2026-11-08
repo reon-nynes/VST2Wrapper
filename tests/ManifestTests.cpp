@@ -1,5 +1,6 @@
 #include "common/Manifest.h"
 #include "Test.h"
+#include "PeFixture.h"
 #include <limits>
 using namespace nytera;
 
@@ -72,9 +73,7 @@ TEST("Manifest.Identity")
 
 TEST("Manifest.PeArchitecture")
 {
-    auto root = std::filesystem::path(NYTERA_SOURCE_ROOT) / "vst2demo";
-    CHECK(require(inspectPeArchitecture(root / "Decapitator.dll")) == Architecture::x86);
-    for (auto filename : {"LexHall.dll", "LittleAlterBoy.dll", "VPRE-73.dll"})
-        CHECK(require(inspectPeArchitecture(root / filename)) == Architecture::x64);
-    CHECK(std::holds_alternative<Failure>(inspectPeArchitecture(root / "missing.dll")));
+    for (auto architecture : {Architecture::x86, Architecture::x64})
+        CHECK(require(inspectPeArchitecture(peFixture(architecture))) == architecture);
+    CHECK(std::holds_alternative<Failure>(inspectPeArchitecture(std::filesystem::path(NYTERA_SOURCE_ROOT) / "missing.dll")));
 }

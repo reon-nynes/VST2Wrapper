@@ -79,7 +79,7 @@ struct BridgeClient::Impl
         };
         if (!ready.load())
         {
-            if (notesOff.exchange(false) && events.emit)
+            if (block.samples > 0 && events.emit && notesOff.exchange(false))
                 for (uint8_t channel = 0; channel < 16; ++channel)
                 {
                     std::array<std::byte, 3> off {static_cast<std::byte>(0xb0 | channel), std::byte{123}, std::byte{0}};

@@ -288,7 +288,7 @@ Create `scripts/Build.ps1`, `scripts/Verify.ps1`, and `README.md`. Complete `doc
 - [x] Complete the design's twelve acceptance checks with the four supplied plugins and controlled fixtures. Record REAPER/OS/plugin versions, editor evidence, latency measurements, real-time/offline behavior, and exact load/activation failures where applicable.
 - [x] Exercise relocation, cache reconstruction, multiple instances, project save/reopen, automation recording/replay, editor closure, DPI changes, MIDI instrument playback, and helper recovery through normal application entry points.
 - [x] Write concise build, generation, installation, cache, and diagnostic instructions. Distinguish observed plugin compatibility from remaining prerequisites in the acceptance matrix.
-- [ ] Self-review the complete diff, run the requested execution method's final independent review, resolve findings, and rerun affected verification before committing the release-ready deliverable.
+- [x] Self-review the complete diff, run the requested execution method's final independent review, resolve findings, and rerun affected verification before committing the release-ready deliverable.
 
 ## Completion conditions
 

@@ -122,7 +122,7 @@ index 231a9f4..b6e5102 100644
                       includeFlagsAndCategory ? JucePlugin_Vst3Category : "",
                       JucePlugin_Manufacturer,
 diff --git a/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp b/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp
-index 3c0ca06..83f3c4e 100644
+index 3c0ca06..88985bd 100644
 --- a/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp
 +++ b/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp
 @@ -736,6 +736,11 @@ private:
@@ -229,29 +229,78 @@ index 3c0ca06..83f3c4e 100644
          if (type == Vst::kAudio)
          {
              if (index < 0 || index >= getNumAudioBuses (dir == Vst::kInput))
-@@ -3588,7 +3627,20 @@ public:
+@@ -3489,7 +3528,7 @@ public:
+     }
+ 
+     //==============================================================================
+-    void processParameterChanges (Vst::IParameterChanges& paramChanges)
++    bool processParameterChanges (Vst::IParameterChanges& paramChanges)
+     {
+         jassert (pluginInstance != nullptr);
+ 
+@@ -3508,6 +3547,9 @@ public:
+         };
+ 
+         const auto numParamsChanged = paramChanges.getParameterCount();
++       #ifdef NYTERA_DYNAMIC_BINDING
++        Steinberg::int32 mappedMidiEvents = 0;
++       #endif
+ 
+         for (Steinberg::int32 i = 0; i < numParamsChanged; ++i)
+         {
+@@ -3519,6 +3561,10 @@ public:
+                #if JUCE_VST3_EMULATE_MIDI_CC_WITH_PARAMETERS
+                 if (juceVST3EditController != nullptr && juceVST3EditController->isMidiControllerParamID (vstParamID))
+                 {
++                   #ifdef NYTERA_DYNAMIC_BINDING
++                    if (numPoints < 0 || numPoints > 4096 - mappedMidiEvents) return false;
++                    mappedMidiEvents += numPoints;
++                   #endif
+                     for (Steinberg::int32 point = 0; point < numPoints; ++point)
+                     {
+                         if (const auto change = getPointFromQueue (paramQueue, point))
+@@ -3534,6 +3580,7 @@ public:
+                 }
+             }
+         }
++        return true;
+     }
+ 
+     void addParameterChangeToMidiBuffer (const Steinberg::int32 offsetSamples, const Vst::ParamID id, const double value)
+@@ -3583,12 +3630,29 @@ public:
+ 
+         midiBuffer.clear();
+ 
+-        if (data.inputParameterChanges != nullptr)
+-            processParameterChanges (*data.inputParameterChanges);
++        const auto rejectMidiInput = [&]() -> tresult
++        {
++            for (int bus = 0; bus < data.numOutputs; ++bus)
++                for (int channel = 0; channel < data.outputs[bus].numChannels; ++channel)
++                {
++                    if (data.symbolicSampleSize == Vst::kSample32)
++                        FloatVectorOperations::clear (data.outputs[bus].channelBuffers32[channel], data.numSamples);
++                    else
++                        FloatVectorOperations::clear (data.outputs[bus].channelBuffers64[channel], data.numSamples);
++                }
++            midiBuffer.clear();
++            return kInvalidArgument;
++        };
++
++        if (data.inputParameterChanges != nullptr && ! processParameterChanges (*data.inputParameterChanges))
++            return rejectMidiInput();
  
         #if JucePlugin_WantsMidiInput
          if (isMidiInputBusEnabled && data.inputEvents != nullptr)
 -            MidiEventList::toMidiBuffer (midiBuffer, *data.inputEvents);
 +        {
 +            if (! MidiEventList::toMidiBuffer (midiBuffer, *data.inputEvents))
-+            {
-+                for (int bus = 0; bus < data.numOutputs; ++bus)
-+                    for (int channel = 0; channel < data.outputs[bus].numChannels; ++channel)
-+                    {
-+                        if (data.symbolicSampleSize == Vst::kSample32)
-+                            FloatVectorOperations::clear (data.outputs[bus].channelBuffers32[channel], data.numSamples);
-+                        else
-+                            FloatVectorOperations::clear (data.outputs[bus].channelBuffers64[channel], data.numSamples);
-+                    }
-+                return kInvalidArgument;
-+            }
++                return rejectMidiInput();
 +        }
         #endif
  
          if (detail::PluginUtilities::getHostType().isWavelab())
-@@ -3710,6 +3762,9 @@ private:
+@@ -3710,6 +3774,9 @@ private:
              const ScopedLock sl (pluginInstance->getCallbackLock());
  
              pluginInstance->setNonRealtime (data.processMode == Vst::kOffline);
@@ -261,7 +310,7 @@ index 3c0ca06..83f3c4e 100644
  
             #if JUCE_DEBUG && ! JucePlugin_ProducesMidiOutput
              const int numMidiEventsComingIn = midiBuffer.getNumEvents();
-@@ -3774,7 +3829,11 @@ private:
+@@ -3774,7 +3841,11 @@ private:
          if (callPrepareToPlay == CallPrepareToPlay::yes)
              p.prepareToPlay (sampleRate, bufferSize);
  
@@ -274,10 +323,10 @@ index 3c0ca06..83f3c4e 100644
  
          bufferMapper.updateFromProcessor (p);
 diff --git a/modules/juce_audio_processors_headless/format_types/juce_VST3Common.h b/modules/juce_audio_processors_headless/format_types/juce_VST3Common.h
-index f6d23b6..e5f57d0 100644
+index f6d23b6..503931e 100644
 --- a/modules/juce_audio_processors_headless/format_types/juce_VST3Common.h
 +++ b/modules/juce_audio_processors_headless/format_types/juce_VST3Common.h
-@@ -1176,9 +1176,12 @@ public:
+@@ -1176,9 +1176,40 @@ public:
      }
  
      //==============================================================================
@@ -287,11 +336,39 @@ index f6d23b6..e5f57d0 100644
          const auto numEvents = eventList.getEventCount();
 +       #if NYTERA_DYNAMIC_BINDING
 +        if (numEvents < 0 || numEvents > 4096) return false;
++        size_t midiEvents = 0, midiBytes = 0;
++        for (const auto message : result)
++        {
++            ++midiEvents;
++            midiBytes += static_cast<size_t> (message.numBytes);
++        }
++        if (midiEvents > 4096 || midiBytes > 1024 * 1024) return false;
++
++        // Validate the combined controller/event-list budget before copying SysEx.
++        for (Steinberg::int32 i = 0; i < numEvents; ++i)
++        {
++            Steinberg::Vst::Event event {};
++            if (eventList.getEvent (i, event) != Steinberg::kResultOk) continue;
++            size_t bytes = 0;
++            if (event.type == Steinberg::Vst::Event::kDataEvent && event.data.type == Steinberg::Vst::DataEvent::kMidiSysEx)
++            {
++                if (event.data.bytes == nullptr || event.data.size < 2) return false;
++                bytes = event.data.size;
++            }
++            else if (const auto message = toMidiMessage (event))
++            {
++                bytes = static_cast<size_t> (message->getRawDataSize());
++            }
++            if (bytes == 0) continue;
++            if (midiEvents == 4096 || bytes > 1024 * 1024 - midiBytes) return false;
++            ++midiEvents;
++            midiBytes += bytes;
++        }
 +       #endif
  
          for (Steinberg::int32 i = 0; i < numEvents; ++i)
          {
-@@ -1187,9 +1190,18 @@ public:
+@@ -1187,9 +1218,18 @@ public:
              if (eventList.getEvent (i, e) != Steinberg::kResultOk)
                  continue;
  
@@ -310,7 +387,7 @@ index f6d23b6..e5f57d0 100644
      }
  
      template <typename Callback>
-@@ -1247,6 +1259,19 @@ private:
+@@ -1247,6 +1287,19 @@ private:
                                      StoredMidiMapping* midiMapping,
                                      Callback&& callback)
      {
@@ -330,7 +407,7 @@ index f6d23b6..e5f57d0 100644
          const auto msg = metadata.getMessage();
  
          if (sendMappedParameter (msg, midiMapping, std::forward<Callback> (callback)))
-@@ -1274,7 +1299,12 @@ private:
+@@ -1274,7 +1327,12 @@ private:
                               StoredMidiMapping* midiMapping,
                               Callback&& callback)
      {

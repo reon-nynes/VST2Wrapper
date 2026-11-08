@@ -163,7 +163,7 @@ template<class Sample> void Processor::processBuffer(juce::AudioBuffer<Sample>& 
     if (!audioReady)
     {
         buffer.clear(); midi.clear();
-        if (pendingNotesOff.exchange(false) && producesMidi())
+        if (buffer.getNumSamples() > 0 && producesMidi() && pendingNotesOff.exchange(false))
             for (int channel = 1; channel <= 16; ++channel) midi.addEvent(juce::MidiMessage::allNotesOff(channel), 0);
         return;
     }
@@ -262,8 +262,10 @@ Status Processor::retrySource()
     {
         auto prepared = client.prepare(*lastConfig);
         if (auto* failure = std::get_if<Failure>(&prepared)) { runtimeDiagnostic = juce::String::fromUTF8(failure->message.c_str()); return *failure; }
-        audioReady = true;
         setLatencySamples(static_cast<int>(client.latencySamples())); tailDuration = client.tailLengthSeconds();
+        const juce::ScopedLock callbackLock(getCallbackLock());
+        processingPosition = 0;
+        audioReady = true;
     }
     runtimeDiagnostic.clear();
     return std::monostate{};

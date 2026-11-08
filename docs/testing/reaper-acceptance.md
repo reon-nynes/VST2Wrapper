@@ -26,7 +26,7 @@ Original-editor mouse gestures change each vendor parameter in REAPER write mode
 
 ## Automated suites
 
-The final pre-review suites pass 101 x64 cases and 18 x86 cases in both Debug and Release. The x64 suite covers the generator, packaging/cache, VST3 COM entry points, bridging, audio/events, parameters, state and recovery. The x86 suite verifies the native VST2 ABI, inspection and editor lifecycle.
+The final suites pass 106 x64 cases and 18 x86 cases in both Debug and Release. The x64 suite covers the generator, packaging/cache, VST3 COM entry points, bridging, audio/events, parameters, state and recovery. The x86 suite verifies the native VST2 ABI, inspection and editor lifecycle. Mandatory architecture tests use the built controlled fixture's PE headers and run independently of commercial demo DLLs.
 
 ```powershell
 pwsh -File scripts/Build.ps1 -Configuration Debug
@@ -37,6 +37,8 @@ pwsh -File scripts/Verify.ps1 -Configuration Release
 ```
 
 `Conversion.ConfiguredAssets` ensures each configuration uses its own fixtures. Release test results therefore exercise Release sources and helpers.
+
+The independent whole-branch review found three runtime issues and a verification dependency. The single fix pass adds `Recovery.MidiTimeline`, `Processor.SysexBudget`, `Processor.ControllerBudget`, `Processor.MidiOrdering` and `Audio.ZeroBlockCleanup`. Regressions reproduced the three runtime failures before their fixes. The recovery case clicks the ordinary editor Retry button after advancing MIDI to a nonzero timeline, then verifies resumed audio and MIDI offset 17. It also checks failure cleanup across a zero-length call. Aggregate checks include mapped controller records and validate the complete input budget before copying SysEx. Equal-offset ordering stays stable. The architecture cases reproduced failure with a commercial DLL unavailable, then pass using controlled PE fixtures.
 
 ## Acceptance coverage
 

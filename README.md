@@ -23,6 +23,8 @@ The source's installation, activation, external data and installed runtimes rema
 
 REAPER projects retain a checksummed per-instance state envelope. The bridge copies VST2 bank/preset chunks when supported and falls back to the current program and reported parameters. It applies early project state before audible processing. The embedded source DLL remains in the `.vst3` file.
 
+For a source without a bank chunk, the fallback captures its selected program and reported values. Edits held only in other programs depend on the source's bank-state support.
+
 The runtime extracts verified payloads automatically under `%LOCALAPPDATA%\Nytera\VST2Wrapper\Cache`. Instances share complete content-addressed payloads and keep an active lease. Idle cache entries are eligible for cleanup after 30 days. A missing cache is reconstructed from the converted file.
 
 A failed instance outputs silence and preserves its last complete captured state. Its editor displays a diagnostic and **Retry this plugin**. Retry verifies the same payload, relaunches its matched helper and restores the recoverable state. Each instance owns its helper job. Closing a project or the application cleans up those processes with bounded waits.
@@ -49,6 +51,8 @@ Use Windows x64 with CMake 3.25 or newer, Git, and Visual Studio 2022 Build Tool
 pwsh -File scripts/Build.ps1 -Configuration Release
 pwsh -File scripts/Verify.ps1 -Configuration Release
 ```
+
+The mandatory automated suites use controlled fixtures built from this repository. Commercial DLLs are optional inputs for the separate compatibility checks.
 
 Equivalent architecture commands use the `x86-release` and `x64-release` configure/build presets. Build both architectures before the `NyteraStage` target. Debug builds use `-Configuration Debug` and the corresponding debug presets.
 

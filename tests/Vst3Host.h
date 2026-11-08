@@ -5,7 +5,24 @@
 #include <pluginterfaces/base/ibstream.h>
 #include <pluginterfaces/vst/ivstaudioprocessor.h>
 #include <pluginterfaces/vst/ivstcomponent.h>
+#include <pluginterfaces/vst/ivstevents.h>
 #include <cstring>
+struct TestEventList : Steinberg::Vst::IEventList
+{
+    std::vector<Steinberg::Vst::Event> events;
+    Steinberg::tresult PLUGIN_API queryInterface(const Steinberg::TUID, void** object) override
+    { *object = nullptr; return Steinberg::kNoInterface; }
+    Steinberg::uint32 PLUGIN_API addRef() override { return 1; }
+    Steinberg::uint32 PLUGIN_API release() override { return 1; }
+    Steinberg::int32 PLUGIN_API getEventCount() override { return static_cast<Steinberg::int32>(events.size()); }
+    Steinberg::tresult PLUGIN_API getEvent(Steinberg::int32 index, Steinberg::Vst::Event& event) override
+    {
+        if (index < 0 || static_cast<size_t>(index) >= events.size()) return Steinberg::kInvalidArgument;
+        event = events[static_cast<size_t>(index)]; return Steinberg::kResultOk;
+    }
+    Steinberg::tresult PLUGIN_API addEvent(Steinberg::Vst::Event& event) override
+    { events.push_back(event); return Steinberg::kResultOk; }
+};
 struct FactoryModule
 {
     HMODULE module = nullptr;

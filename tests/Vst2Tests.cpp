@@ -1,5 +1,6 @@
 #include "helper/Vst2Instance.h"
 #include "Test.h"
+#include "PeFixture.h"
 #include <cmath>
 using namespace nytera;
 struct FixtureCounters { uint32_t opens, closes, earlyCallbackOk; };
@@ -65,7 +66,7 @@ TEST("Vst2.InvalidDll")
 }
 TEST("Vst2.WrongArchitecture")
 {
-    auto file = std::filesystem::path(NYTERA_SOURCE_ROOT) / "vst2demo" / (sizeof(void*) == 8 ? "Decapitator.dll" : "VPRE-73.dll");
+    auto file = peFixture(sizeof(void*) == 8 ? Architecture::x86 : Architecture::x64);
     auto result = Vst2Instance::open(file);
     CHECK(std::holds_alternative<Failure>(result));
     CHECK(std::get<Failure>(result).code == ErrorCode::architecture);

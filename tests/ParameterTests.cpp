@@ -10,8 +10,10 @@
 #include <thread>
 #include <pluginterfaces/vst/ivstprocesscontext.h>
 #include <pluginterfaces/vst/ivstparameterchanges.h>
+#include <pluginterfaces/vst/ivstmidicontrollers.h>
 #include <cmath>
 #include "common/BoundedQueue.h"
+#include "common/Native.h"
 namespace Steinberg { DEF_CLASS_IID(IPlugViewContentScaleSupport) }
 using namespace nytera;
 struct StateOutputChanges : Steinberg::Vst::IParameterChanges
@@ -453,4 +455,194 @@ TEST("Editor.ContentScale")
         RECT editor {}, parent {}; GetWindowRect(original, &editor); GetWindowRect(plugin.window, &parent);
         CHECK(editor.left >= parent.left && editor.top >= parent.top && editor.right <= parent.right + 1 && editor.bottom <= parent.bottom + 1);
     }
+}
+struct MidiPlugin : ParameterPlugin
+{
+    IAudioProcessor* audio = nullptr;
+    std::array<float, 64> left {}, right {};
+    std::array<float*, 2> channels {left.data(), right.data()};
+    AudioBusBuffers output {};
+    ProcessContext context {};
+    ProcessData data;
+    TestEventList incoming, outgoing;
+    int64_t position = 0;
+    static std::filesystem::path package(const char* name)
+    {
+        auto root = std::filesystem::path(NYTERA_SOURCE_ROOT);
+        auto folder = root / "out/midi-integration" / (std::string(name) + std::to_string(GetCurrentProcessId()));
+        std::filesystem::create_directories(folder);
+        auto source = root / "out/build/x64/" NYTERA_TEST_CONFIG "/NyteraInstrumentFixture.dll";
+        auto native = require(Vst2Instance::open(source)); auto manifest = require(native->inspect());
+        auto path = folder / "Midi.vst3";
+        require(writePackage({manifest, NYTERA_INSTRUMENT_TEMPLATE, root / "out/build/x64/" NYTERA_TEST_CONFIG "/NyteraBridge.exe", source, {}}, path));
+        return path;
+    }
+    explicit MidiPlugin(const char* name) : ParameterPlugin(package(name))
+    {
+        CHECK(component->queryInterface(IAudioProcessor::iid, reinterpret_cast<void**>(&audio)) == kResultOk);
+        ProcessSetup setup {kOffline, kSample32, 64, 48000};
+        CHECK(audio->setupProcessing(setup) == kResultOk);
+        CHECK(component->activateBus(kAudio, kOutput, 0, true) == kResultOk);
+        CHECK(component->activateBus(kEvent, kInput, 0, true) == kResultOk);
+        CHECK(component->activateBus(kEvent, kOutput, 0, true) == kResultOk);
+        CHECK(component->setActive(true) == kResultOk); CHECK(audio->setProcessing(true) == kResultOk);
+        outgoing.events.reserve(8192);
+        output.numChannels = 2; output.channelBuffers32 = channels.data();
+        context.sampleRate = 48000; context.state = ProcessContext::kPlaying;
+        data.processMode = kOffline; data.symbolicSampleSize = kSample32; data.numSamples = 64;
+        data.numOutputs = 1; data.outputs = &output; data.processContext = &context;
+        data.inputEvents = &incoming; data.outputEvents = &outgoing;
+    }
+    ~MidiPlugin() { audio->setProcessing(false); component->setActive(false); audio->release(); }
+    tresult process()
+    {
+        context.projectTimeSamples = position; outgoing.events.clear();
+        auto result = audio->process(data); position += data.numSamples; return result;
+    }
+    HWND originalEditor() const
+    {
+        HWND result = nullptr;
+        EnumChildWindows(window, [](HWND child, LPARAM target) -> BOOL
+        {
+            wchar_t name[128] {}; GetClassNameW(child, name, 128);
+            if (std::wstring(name) == L"NyteraFixtureEditor") *reinterpret_cast<HWND*>(target) = child;
+            return TRUE;
+        }, reinterpret_cast<LPARAM>(&result));
+        return result;
+    }
+};
+TEST("Recovery.MidiTimeline")
+{
+    MidiPlugin plugin("retry"); plugin.openEditor();
+    Event note {}; note.type = Event::kNoteOnEvent; note.sampleOffset = 17;
+    note.noteOn.channel = 0; note.noteOn.pitch = 60; note.noteOn.velocity = 1;
+    for (int block = 0; block < 6; ++block)
+    {
+        plugin.incoming.events = block == 0 ? std::vector<Event>{note} : std::vector<Event>{};
+        CHECK(plugin.process() == kResultOk);
+    }
+    CHECK(plugin.left.back() == 0.5f);
+    HWND original = plugin.originalEditor(); CHECK(original);
+    RECT originalBounds {}; GetWindowRect(original, &originalBounds);
+    DWORD oldProcess = 0; GetWindowThreadProcessId(original, &oldProcess);
+    Handle helper(OpenProcess(PROCESS_TERMINATE | SYNCHRONIZE, FALSE, oldProcess));
+    CHECK(TerminateProcess(helper.get(), 1)); CHECK(WaitForSingleObject(helper.get(), 1000) == WAIT_OBJECT_0);
+    pumpMessages();
+    plugin.data.numSamples = 0;
+    CHECK(plugin.process() == kResultOk && plugin.outgoing.events.empty());
+    plugin.data.numSamples = 64;
+    CHECK(plugin.process() == kResultOk && plugin.outgoing.events.size() == 16);
+    for (const auto& event : plugin.outgoing.events)
+        CHECK(event.type == Event::kLegacyMIDICCOutEvent && event.midiCCOut.controlNumber == 123);
+    HWND peer = GetWindow(plugin.window, GW_CHILD); CHECK(peer);
+    POINT point {(originalBounds.left + originalBounds.right) / 2, originalBounds.bottom - MulDiv(31, GetDpiForWindow(peer), 96)};
+    ScreenToClient(peer, &point);
+    POINT screen = point; ClientToScreen(peer, &screen); SetCursorPos(screen.x, screen.y);
+    auto coordinate = MAKELPARAM(point.x, point.y);
+    SendMessageW(peer, WM_MOUSEMOVE, 0, coordinate);
+    SendMessageW(peer, WM_LBUTTONDOWN, MK_LBUTTON, coordinate); SendMessageW(peer, WM_LBUTTONUP, 0, coordinate);
+    pumpMessages();
+    original = plugin.originalEditor(); CHECK(original);
+    DWORD newProcess = 0; GetWindowThreadProcessId(original, &newProcess); CHECK(newProcess != oldProcess);
+    bool echoed = false;
+    for (int block = 0; block < 6; ++block)
+    {
+        plugin.incoming.events = block == 0 ? std::vector<Event>{note} : std::vector<Event>{};
+        CHECK(plugin.process() == kResultOk);
+        if (block >= 2) CHECK(plugin.left.back() == 0.5f);
+        for (const auto& event : plugin.outgoing.events)
+            if (event.type == Event::kNoteOnEvent)
+            { CHECK(event.sampleOffset == 17 && event.noteOn.pitch == 60); echoed = true; }
+    }
+    CHECK(echoed);
+}
+struct MidiPoints : IParamValueQueue
+{
+    ParamID id = 0;
+    int32 count = 0, offset = 0;
+    tresult PLUGIN_API queryInterface(const TUID, void** object) override { *object = nullptr; return kNoInterface; }
+    uint32 PLUGIN_API addRef() override { return 1; }
+    uint32 PLUGIN_API release() override { return 1; }
+    ParamID PLUGIN_API getParameterId() override { return id; }
+    int32 PLUGIN_API getPointCount() override { return count; }
+    tresult PLUGIN_API getPoint(int32 index, int32& sample, ParamValue& value) override
+    { if (index < 0 || index >= count) return kInvalidArgument; sample = offset; value = 0.25; return kResultOk; }
+    tresult PLUGIN_API addPoint(int32, ParamValue, int32&) override { return kNotImplemented; }
+};
+struct MidiChanges : IParameterChanges
+{
+    MidiPoints points;
+    explicit MidiChanges(MidiPlugin& plugin)
+    {
+        IMidiMapping* mapping = nullptr;
+        CHECK(plugin.controller->queryInterface(IMidiMapping::iid, reinterpret_cast<void**>(&mapping)) == kResultOk);
+        auto result = mapping->getMidiControllerAssignment(0, 0, 7, points.id); mapping->release();
+        CHECK(result == kResultOk);
+    }
+    tresult PLUGIN_API queryInterface(const TUID, void** object) override { *object = nullptr; return kNoInterface; }
+    uint32 PLUGIN_API addRef() override { return 1; }
+    uint32 PLUGIN_API release() override { return 1; }
+    int32 PLUGIN_API getParameterCount() override { return 1; }
+    IParamValueQueue* PLUGIN_API getParameterData(int32 index) override { return index == 0 ? &points : nullptr; }
+    IParamValueQueue* PLUGIN_API addParameterData(const ParamID&, int32&) override { return nullptr; }
+};
+TEST("Processor.SysexBudget")
+{
+    MidiPlugin plugin("sysex-budget");
+    Bytes bytes(1024 * 1024, std::byte{0x42}); bytes.front() = std::byte{0xf0}; bytes.back() = std::byte{0xf7};
+    Event sysex {}; sysex.type = Event::kDataEvent; sysex.sampleOffset = 17;
+    sysex.data.type = DataEvent::kMidiSysEx; sysex.data.bytes = reinterpret_cast<const uint8*>(bytes.data());
+    sysex.data.size = static_cast<uint32>(bytes.size()); plugin.incoming.events.assign(3, sysex);
+    CHECK(plugin.process() == kInvalidArgument);
+    CHECK(std::all_of(plugin.left.begin(), plugin.left.end(), [](float value) { return value == 0; }));
+    CHECK(plugin.outgoing.events.empty());
+    plugin.incoming.events.assign(1, sysex);
+    bool echoed = false;
+    for (int block = 0; block < 5; ++block)
+    {
+        CHECK(plugin.process() == kResultOk); plugin.incoming.events.clear();
+        for (const auto& event : plugin.outgoing.events)
+            if (event.type == Event::kDataEvent)
+            { CHECK(event.data.size == bytes.size() && event.sampleOffset == 17); echoed = true; }
+    }
+    CHECK(echoed);
+}
+TEST("Processor.ControllerBudget")
+{
+    MidiPlugin plugin("controller-budget"); MidiChanges changes(plugin);
+    plugin.data.inputParameterChanges = &changes;
+    changes.points.count = 4097;
+    CHECK(plugin.process() == kInvalidArgument);
+    changes.points.count = 2;
+    Event note {}; note.type = Event::kNoteOnEvent; note.noteOn.pitch = 60; note.noteOn.velocity = 1;
+    plugin.incoming.events.assign(4095, note);
+    CHECK(plugin.process() == kInvalidArgument);
+    changes.points.count = 4096; plugin.incoming.events.clear();
+    CHECK(plugin.process() == kResultOk);
+}
+TEST("Processor.MidiOrdering")
+{
+    MidiPlugin plugin("midi-ordering"); MidiChanges changes(plugin);
+    changes.points.count = 1; changes.points.offset = 17; plugin.data.inputParameterChanges = &changes;
+    std::array<uint8, 5> bytes {0xf0, 1, 2, 3, 0xf7};
+    Event note {}; note.type = Event::kNoteOnEvent; note.sampleOffset = 17;
+    note.noteOn.pitch = 60; note.noteOn.velocity = 1;
+    Event sysex {}; sysex.type = Event::kDataEvent; sysex.sampleOffset = 17;
+    sysex.data.type = DataEvent::kMidiSysEx; sysex.data.bytes = bytes.data(); sysex.data.size = static_cast<uint32>(bytes.size());
+    plugin.incoming.events = {note, sysex, note}; plugin.incoming.events.back().noteOn.pitch = 61;
+    bool checked = false;
+    for (int block = 0; block < 5; ++block)
+    {
+        CHECK(plugin.process() == kResultOk); plugin.data.inputParameterChanges = nullptr; plugin.incoming.events.clear();
+        const auto& events = plugin.outgoing.events;
+        if (events.empty()) continue;
+        CHECK(events.size() == 4);
+        for (const auto& event : events) CHECK(event.sampleOffset == 17);
+        CHECK(events[0].type == Event::kLegacyMIDICCOutEvent && events[0].midiCCOut.controlNumber == 7);
+        CHECK(events[1].type == Event::kNoteOnEvent && events[1].noteOn.pitch == 60);
+        CHECK(events[2].type == Event::kDataEvent && std::memcmp(events[2].data.bytes, bytes.data(), bytes.size()) == 0);
+        CHECK(events[3].type == Event::kNoteOnEvent && events[3].noteOn.pitch == 61);
+        checked = true;
+    }
+    CHECK(checked);
 }

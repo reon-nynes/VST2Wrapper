@@ -74,6 +74,28 @@ TEST("Audio.VariableBlocks")
     for (size_t i = 0; i < samples.size(); ++i) CHECK(samples[i] == (i == 1040 ? 0.5f : 0.0f));
 }
 TEST("Audio.ZeroBlock") { CHECK(impulse(true, true) == impulse(true, false)); }
+TEST("Audio.ZeroBlockCleanup")
+{
+    AudioSession session(64, "NyteraInstrumentFixture.dll");
+    std::vector<std::pair<int64_t, Bytes>> outgoing;
+    auto emit = [](void* context, int64_t sample, std::span<const std::byte> message)
+    { static_cast<decltype(outgoing)*>(context)->push_back({sample, Bytes(message.begin(), message.end())}); };
+    std::array<std::byte, 3> on {std::byte{0x90}, std::byte{60}, std::byte{100}};
+    MidiEvent note {0, on};
+    for (int block = 0; block < 4; ++block)
+        CHECK(session.block(64, block == 0 ? std::span(&note, 1) : std::span<MidiEvent>{}, &outgoing, emit) != ProcessResult::failed);
+    CHECK(outgoing.size() == 1 && outgoing[0].second == Bytes(on.begin(), on.end()));
+    outgoing.clear();
+    CHECK(session.block(0, {}, &outgoing, emit, 10000, 123, false) != ProcessResult::failed);
+    CHECK(outgoing.empty());
+    CHECK(session.block(64, {}, &outgoing, emit, 10000, 123, false) != ProcessResult::failed);
+    CHECK(outgoing.size() == 16);
+    for (uint8_t channel = 0; channel < 16; ++channel)
+        CHECK(outgoing[channel].second == Bytes({static_cast<std::byte>(0xb0 | channel), std::byte{123}, std::byte{0}}));
+    outgoing.clear();
+    CHECK(session.block(64, {}, &outgoing, emit, 10000, 123, false) != ProcessResult::failed);
+    CHECK(outgoing.empty());
+}
 TEST("Audio.SeekFlush")
 {
     AudioSession session;

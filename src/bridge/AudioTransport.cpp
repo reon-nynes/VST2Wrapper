@@ -271,7 +271,7 @@ ProcessResult AudioTransport::process(AudioBlockView block, EventBlockView event
     bool playing = (transport.flags & 2) != 0;
     if (hadTransport && ((playing && wasPlaying && transport.projectSamples != expectedProject) || playing != wasPlaying)) reset();
     hadTransport = true; wasPlaying = playing; expectedProject = transport.projectSamples + block.samples;
-    if (pendingNotesOff && events.emit)
+    if (pendingNotesOff && events.emit && block.samples > 0)
     {
         for (uint8_t channel = 0; channel < 16; ++channel)
         {
