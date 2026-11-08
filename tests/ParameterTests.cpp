@@ -534,10 +534,19 @@ TEST("Recovery.MidiTimeline")
     CHECK(plugin.process() == kResultOk && plugin.outgoing.events.size() == 16);
     for (const auto& event : plugin.outgoing.events)
         CHECK(event.type == Event::kLegacyMIDICCOutEvent && event.midiCCOut.controlNumber == 123);
+    std::unique_ptr<HWND__, decltype(&DestroyWindow)> overlap(CreateWindowExW(WS_EX_TOPMOST, L"BUTTON",
+        L"Nytera test input overlap", WS_POPUP | WS_VISIBLE, originalBounds.left, originalBounds.top,
+        originalBounds.right - originalBounds.left, originalBounds.bottom - originalBounds.top,
+        nullptr, nullptr, GetModuleHandleW(nullptr), nullptr), &DestroyWindow);
+    CHECK(overlap);
+    CHECK(SetWindowPos(plugin.window, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW));
+    SetForegroundWindow(plugin.window);
     HWND peer = GetWindow(plugin.window, GW_CHILD); CHECK(peer);
+    SetFocus(peer);
     POINT point {(originalBounds.left + originalBounds.right) / 2, originalBounds.bottom - MulDiv(31, GetDpiForWindow(peer), 96)};
     ScreenToClient(peer, &point);
     POINT screen = point; ClientToScreen(peer, &screen); SetCursorPos(screen.x, screen.y);
+    CHECK(WindowFromPoint(screen) == peer);
     auto coordinate = MAKELPARAM(point.x, point.y);
     SendMessageW(peer, WM_MOUSEMOVE, 0, coordinate);
     SendMessageW(peer, WM_LBUTTONDOWN, MK_LBUTTON, coordinate); SendMessageW(peer, WM_LBUTTONUP, 0, coordinate);
