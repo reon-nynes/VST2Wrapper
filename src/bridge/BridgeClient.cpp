@@ -12,6 +12,7 @@ struct BridgeClient::Impl
     std::unique_ptr<Control> control;
     Handle process, job;
     std::atomic<uint32_t> pid {0};
+    std::atomic<uint32_t> editorWidth {480}, editorHeight {320};
     std::string pipeName;
     uint32_t sequence = 0;
     Result<Bytes> exchange(ControlCommand command, std::span<const std::byte> payload, std::chrono::milliseconds timeout)
@@ -130,4 +131,25 @@ std::vector<HostNotification> BridgeClient::takeNotifications()
 }
 uint32_t BridgeClient::processId() const noexcept { return impl->pid.load(); }
 std::string BridgeClient::endpoint() const { return impl->pipeName; }
+Status BridgeClient::openEditor(uint64_t parentWindow, float scale)
+{
+    Writer writer;
+    writer.number(parentWindow); writer.floating(scale);
+    auto reply = request(ControlCommand::openEditor, writer.bytes);
+    if (auto* failure = std::get_if<Failure>(&reply)) return *failure;
+    try
+    {
+        Reader reader(std::get<Bytes>(reply));
+        impl->editorWidth = reader.number<uint32_t>();
+        impl->editorHeight = reader.number<uint32_t>();
+        reader.finish();
+        return std::monostate{};
+    }
+    catch (const std::exception& error) { return Failure{ErrorCode::invalidData, error.what()}; }
+}
+void BridgeClient::closeEditor() noexcept
+{
+    try { request(ControlCommand::closeEditor, {}, std::chrono::seconds(2)); } catch (...) {}
+}
+Size BridgeClient::editorSize() const noexcept { return {impl->editorWidth.load(), impl->editorHeight.load()}; }
 }

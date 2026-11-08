@@ -9,6 +9,20 @@ static DWORD remainingTime(std::chrono::steady_clock::time_point deadline)
     auto milliseconds = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
     return static_cast<DWORD>(std::clamp<int64_t>(milliseconds, 0, MAXDWORD - 1));
 }
+static bool waitForIo(HANDLE event, std::chrono::steady_clock::time_point deadline)
+{
+    // Creating a child HWND in another process can synchronously notify its
+    // parent. Dispatch sent messages while waiting, without running arbitrary
+    // posted UI commands inside a control request.
+    for (;;)
+    {
+        auto result = MsgWaitForMultipleObjectsEx(1, &event, remainingTime(deadline), QS_SENDMESSAGE, MWMO_INPUTAVAILABLE);
+        if (result == WAIT_OBJECT_0) return true;
+        if (result != WAIT_OBJECT_0 + 1 || std::chrono::steady_clock::now() >= deadline) return false;
+        MSG message;
+        PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
+    }
+}
 Result<Control> Control::server(const std::wstring& endpoint)
 {
     PSECURITY_DESCRIPTOR descriptor = nullptr;
@@ -43,7 +57,7 @@ Status Control::accept(std::chrono::milliseconds timeout)
     auto error = GetLastError();
     if (error == ERROR_PIPE_CONNECTED) return std::monostate{};
     if (error != ERROR_IO_PENDING) return Failure{ErrorCode::io, "Bridge accept failed"};
-    if (WaitForSingleObject(event.get(), static_cast<DWORD>(timeout.count())) != WAIT_OBJECT_0)
+    if (!waitForIo(event.get(), std::chrono::steady_clock::now() + timeout))
     {
         CancelIoEx(pipe.get(), &operation);
         DWORD ignored;
@@ -70,7 +84,7 @@ Status Control::transfer(std::span<std::byte> bytes, bool writing, std::chrono::
         if (!success)
         {
             if (GetLastError() != ERROR_IO_PENDING) return Failure{ErrorCode::disconnected, "Helper pipe disconnected"};
-            if (WaitForSingleObject(event.get(), remainingTime(deadline)) != WAIT_OBJECT_0)
+            if (!waitForIo(event.get(), deadline))
             {
                 CancelIoEx(pipe.get(), &operation);
                 GetOverlappedResult(pipe.get(), &operation, &transferred, TRUE);

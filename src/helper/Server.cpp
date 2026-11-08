@@ -1,9 +1,11 @@
 #include "Server.h"
 #include "Vst2Instance.h"
+#include "EditorHost.h"
 #include "bridge/Control.h"
 #include "common/Codec.h"
 #include <mutex>
 #include <thread>
+#include <atomic>
 
 namespace nytera
 {
@@ -14,10 +16,24 @@ public:
     {
         notifications.reserve(8192);
     }
+    ~HelperServer()
+    {
+        if (instance) instance->onNotification = {};
+        editor.reset();
+        instance.reset();
+    }
     int run()
     {
         while (running)
         {
+            auto now = std::chrono::steady_clock::now();
+            if (editor && now >= nextIdle)
+            {
+                editor->idle();
+                nextIdle = now + std::chrono::milliseconds(20);
+            }
+            auto pending = pendingSize.exchange(0);
+            if (editor && pending) editor->resize({static_cast<uint32_t>(pending >> 32), static_cast<uint32_t>(pending)});
             MSG message;
             while (PeekMessageW(&message, nullptr, 0, 0, PM_REMOVE))
             {
@@ -65,6 +81,8 @@ private:
                     throw Failure{ErrorCode::identity, "Source plugin does not match embedded binding"};
                 instance->onNotification = [this](const HostNotification& event)
                 {
+                    if (event.opcode == VST_HOST_OPCODE_EDITOR_RESIZE && event.index > 0 && event.value > 0)
+                        pendingSize = (uint64_t(static_cast<uint32_t>(event.index)) << 32) | static_cast<uint32_t>(event.value);
                     std::lock_guard lock(notificationMutex);
                     if (notifications.size() < 8192) notifications.push_back(event);
                 };
@@ -76,6 +94,22 @@ private:
             switch (request.command)
             {
                 case ControlCommand::inspect: response.payload = encodeManifest(actual); break;
+                case ControlCommand::openEditor:
+                {
+                    Reader reader(request.payload);
+                    auto parent = reader.number<uint64_t>();
+                    reader.real32();
+                    reader.finish();
+                    if (parent > UINTPTR_MAX) throw Failure{ErrorCode::invalidData, "Host window handle is out of range"};
+                    editor = std::make_unique<EditorHost>(*instance);
+                    auto opened = editor->open(reinterpret_cast<HWND>(static_cast<uintptr_t>(parent)));
+                    if (auto* failure = std::get_if<Failure>(&opened)) throw *failure;
+                    Writer writer;
+                    writer.number(editor->size().width); writer.number(editor->size().height);
+                    response.payload = std::move(writer.bytes);
+                    break;
+                }
+                case ControlCommand::closeEditor: editor.reset(); break;
                 case ControlCommand::poll:
                 {
                     std::vector<HostNotification> pending;
@@ -115,10 +149,13 @@ private:
     Control channel;
     std::string token;
     std::unique_ptr<Vst2Instance> instance;
+    std::unique_ptr<EditorHost> editor;
     Manifest expected, actual;
     bool running = true;
     std::mutex notificationMutex;
     std::vector<HostNotification> notifications;
+    std::atomic<uint64_t> pendingSize {0};
+    std::chrono::steady_clock::time_point nextIdle {};
 };
 
 int runHelperServer(const std::wstring& endpoint, const std::string& token)

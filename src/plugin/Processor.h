@@ -1,6 +1,7 @@
 #pragma once
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "ModuleBinding.h"
+#include "bridge/BridgeClient.h"
 namespace nytera
 {
 class Processor final : public juce::AudioProcessor
@@ -12,8 +13,8 @@ public:
     void releaseResources() override {}
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
     bool isBusesLayoutSupported(const BusesLayout&) const override;
-    bool hasEditor() const override { return false; }
-    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    bool hasEditor() const override { return moduleBinding().hasEditor; }
+    juce::AudioProcessorEditor* createEditor() override;
     bool acceptsMidi() const override { return moduleBinding().midiInput; }
     bool producesMidi() const override { return moduleBinding().midiOutput; }
     double getTailLengthSeconds() const override { return moduleBinding().tailSeconds; }
@@ -24,7 +25,10 @@ public:
     void changeProgramName(int, const juce::String&) override {}
     void getStateInformation(juce::MemoryBlock&) override {}
     void setStateInformation(const void*, int) override {}
+    Status ensureStarted();
+    BridgeClient& bridge() { return client; }
 private:
     static BusesProperties makeBuses();
+    BridgeClient client;
 };
 }

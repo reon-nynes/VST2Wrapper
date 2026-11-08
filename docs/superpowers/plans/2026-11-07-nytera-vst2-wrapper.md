@@ -1,6 +1,6 @@
 # Nytera VST2 Wrapper Implementation Plan
 
-> **For agentic workers** REQUIRED SUB-SKILL. Use superpowers:subagent-driven-development or superpowers:executing-plans to implement this plan task by task. Steps use checkbox syntax for tracking. The user will choose the execution method during plan review.
+> **For agentic workers** REQUIRED SUB-SKILL. The user selected Native execution through superpowers:executing-plans. Implement this plan task by task. Steps use checkbox syntax for tracking.
 
 **Goal.** Build a standalone Nytera application that turns an x86 or x64 Windows VST2 DLL into a dedicated single-file x64 VST3 for REAPER, embedding the source and bridge and presenting the original editor.
 

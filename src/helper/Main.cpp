@@ -4,6 +4,7 @@
 #include <objbase.h>
 int wmain(int argc, wchar_t** argv)
 {
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     int result = 1;
     if (argc == 4 && std::wstring(argv[1]) == L"--serve")

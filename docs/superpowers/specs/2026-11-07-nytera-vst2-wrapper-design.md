@@ -2,7 +2,7 @@
 
 Date 2026-11-07
 
-Status. Approved by the user on 2026-11-07. The implementation plan is ready for review.
+Status. Approved by the user on 2026-11-07. Native implementation is in progress.
 
 ## Intent and agreed requirements
 

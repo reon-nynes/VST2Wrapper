@@ -1,5 +1,6 @@
 #include "Processor.h"
 #include "Parameter.h"
+#include "Editor.h"
 namespace nytera
 {
 juce::AudioProcessor::BusesProperties Processor::makeBuses()
@@ -23,6 +24,12 @@ bool Processor::isBusesLayoutSupported(const BusesLayout& layout) const
 {
     return layout.getMainInputChannels() == static_cast<int>(moduleBinding().inputs.size())
         && layout.getMainOutputChannels() == static_cast<int>(moduleBinding().outputs.size());
+}
+juce::AudioProcessorEditor* Processor::createEditor() { return new Editor(*this); }
+Status Processor::ensureStarted()
+{
+    if (client.processId() != 0) return std::monostate{};
+    return Failure{ErrorCode::plugin, "Runtime payload has yet to be packaged"};
 }
 }
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter() { return new nytera::Processor(); }

@@ -20,6 +20,9 @@ public:
     std::vector<HostNotification> takeNotifications();
     uint32_t processId() const noexcept;
     std::string endpoint() const;
+    Status openEditor(uint64_t parentWindow, float scale = 1.0f);
+    void closeEditor() noexcept;
+    Size editorSize() const noexcept;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;
