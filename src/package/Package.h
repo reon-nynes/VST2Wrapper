@@ -12,4 +12,5 @@ Status writePackage(const PackageInput&, const std::filesystem::path& output);
 Result<Manifest> readModuleManifest(HMODULE);
 Result<Manifest> readPackageManifest(const std::filesystem::path&);
 Bytes readResource(HMODULE, uint32_t resourceId);
+std::filesystem::path relativePayloadPath(const std::string&);
 }

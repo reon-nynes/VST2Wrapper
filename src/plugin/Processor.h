@@ -2,12 +2,14 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include "ModuleBinding.h"
 #include "bridge/BridgeClient.h"
+#include <mutex>
 namespace nytera
 {
 class Processor final : public juce::AudioProcessor
 {
 public:
     Processor();
+    ~Processor() override;
     const juce::String getName() const override { return juce::String::fromUTF8(moduleDisplayName()); }
     void prepareToPlay(double, int) override {}
     void releaseResources() override {}
@@ -29,6 +31,8 @@ public:
     BridgeClient& bridge() { return client; }
 private:
     static BusesProperties makeBuses();
+    std::unique_ptr<struct ExtractedPayload> payload;
     BridgeClient client;
+    std::mutex startupMutex;
 };
 }

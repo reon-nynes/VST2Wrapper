@@ -1,10 +1,24 @@
 #include "bridge/BridgeClient.h"
+#include "package/Package.h"
 #include <iostream>
 #include <windows.h>
 #include <thread>
 int wmain(int argc, wchar_t** argv)
 {
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    if (argc == 7 && std::wstring(argv[1]) == L"--package")
+    {
+        try
+        {
+            auto decoded = nytera::decodeManifest(nytera::readFile(argv[5]));
+            if (auto* error = std::get_if<nytera::Failure>(&decoded)) throw std::runtime_error(error->message);
+            auto status = nytera::writePackage({std::get<nytera::Manifest>(decoded), argv[2], argv[3], argv[4], {}}, argv[6]);
+            if (auto* error = std::get_if<nytera::Failure>(&status)) throw std::runtime_error(error->message);
+            std::cout << "Packaged " << nytera::pathUtf8(argv[6]) << '\n';
+            return 0;
+        }
+        catch (const std::exception& error) { std::cerr << error.what() << '\n'; return 1; }
+    }
     if (argc != 4 && argc != 5) { std::cerr << "Usage: NyteraBridgeProbe <helper.exe> <plugin.dll> <manifest> [--editor-smoke]\n"; return 2; }
     try
     {
