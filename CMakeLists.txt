@@ -35,6 +35,12 @@ target_link_libraries(NyteraBridgeProbe PRIVATE NyteraBridgeClient)
 target_link_libraries(NyteraBridgeProbe PRIVATE NyteraPackage)
 
 if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    add_library(NyteraConversion STATIC src/generator/Conversion.cpp)
+    target_link_libraries(NyteraConversion PUBLIC NyteraPackage NyteraBridgeClient)
+    juce_add_gui_app(NyteraVST2Wrapper COMPANY_NAME Nytera PRODUCT_NAME NyteraVST2Wrapper)
+    target_sources(NyteraVST2Wrapper PRIVATE src/generator/Main.cpp src/generator/MainComponent.cpp)
+    target_compile_definitions(NyteraVST2Wrapper PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0)
+    target_link_libraries(NyteraVST2Wrapper PRIVATE NyteraConversion juce::juce_gui_extra)
     add_library(NyteraVst3Sdk STATIC
         "${NYTERA_VST3_SDK}/pluginterfaces/base/funknown.cpp"
         "${NYTERA_VST3_SDK}/pluginterfaces/base/coreiids.cpp"
@@ -65,6 +71,18 @@ if(CMAKE_SIZEOF_VOID_P EQUAL 8)
         target_compile_definitions(Nytera${kind} PUBLIC NYTERA_DYNAMIC_BINDING=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
         target_link_libraries(Nytera${kind} PRIVATE NyteraPackage NyteraBridgeClient juce::juce_audio_processors)
     endforeach()
+    add_custom_target(NyteraStage
+        COMMAND "${CMAKE_COMMAND}"
+            "-DDESTINATION=${PROJECT_SOURCE_DIR}/out/package"
+            "-DGENERATOR=$<TARGET_FILE:NyteraVST2Wrapper>"
+            "-DX64_HELPER=$<TARGET_FILE:NyteraBridge>"
+            "-DX86_HELPER=${PROJECT_SOURCE_DIR}/out/build/x86/$<CONFIG>/NyteraBridge.exe"
+            "-DEFFECT=$<TARGET_FILE:NyteraEffect_VST3>"
+            "-DINSTRUMENT=$<TARGET_FILE:NyteraInstrument_VST3>"
+            "-DJUCE=${JUCE_SOURCE_DIR}" "-DVST2=${vst2sdk_SOURCE_DIR}"
+            -P "${PROJECT_SOURCE_DIR}/cmake/Stage.cmake"
+        DEPENDS NyteraVST2Wrapper NyteraBridge NyteraEffect_VST3 NyteraInstrument_VST3
+        VERBATIM)
 endif()
 
 if(BUILD_TESTING)
@@ -103,6 +121,13 @@ if(BUILD_TESTING)
         target_sources(NyteraTests PRIVATE tests/ParameterTests.cpp)
         target_sources(NyteraTests PRIVATE tests/StateTests.cpp)
         target_sources(NyteraTests PRIVATE tests/RecoveryTests.cpp)
+        target_sources(NyteraTests PRIVATE tests/ConversionTests.cpp)
+        target_link_libraries(NyteraTests PRIVATE NyteraConversion)
+        target_compile_definitions(NyteraTests PRIVATE NYTERA_INSTRUMENT_TEMPLATE="$<TARGET_FILE:NyteraInstrument_VST3>")
+        add_dependencies(NyteraTests NyteraInstrument_VST3)
+        foreach(test MatchedHelper MetadataMatchesOutput NoCompiler CancelPreservesOutput InvalidDestination SupportReexport CancelInspection)
+            add_test(NAME Conversion.${test} COMMAND NyteraTests Conversion.${test})
+        endforeach()
         foreach(test CrashDuringState HungHelper RetryBinding TeardownRace MalformedMessage EditorRace StartupCancel OfflineStop)
             add_test(NAME Recovery.${test} COMMAND NyteraTests Recovery.${test})
         endforeach()

@@ -6,6 +6,7 @@
 #include <optional>
 #include <chrono>
 #include <memory>
+#include <functional>
 
 namespace nytera
 {
@@ -18,7 +19,7 @@ public:
     ~BridgeClient();
     BridgeClient(const BridgeClient&) = delete;
     BridgeClient& operator=(const BridgeClient&) = delete;
-    Status start(const Manifest&, const std::filesystem::path& helper, const std::filesystem::path& source);
+    Status start(const Manifest&, const std::filesystem::path& helper, const std::filesystem::path& source, std::function<bool()> cancelled = {});
     Result<Bytes> request(ControlCommand, std::span<const std::byte> = {}, std::chrono::milliseconds timeout = std::chrono::seconds(10));
     void stop() noexcept;
     BridgeStatus status() const noexcept;

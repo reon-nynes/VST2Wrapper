@@ -32,7 +32,12 @@ Result<std::unique_ptr<Vst2Instance>> Vst2Instance::open(const std::filesystem::
         instance->sourceDirectory = instance->source.parent_path().string();
         trace("Loading DLL");
         instance->module = LoadLibraryExW(instance->source.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
-        if (!instance->module) return Failure{ErrorCode::plugin, "Windows could not load DLL or dependency (error " + std::to_string(GetLastError()) + ")"};
+        if (!instance->module)
+        {
+            auto error = GetLastError(); wchar_t message[1024] {};
+            FormatMessageW(FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS, nullptr, error, 0, message, 1024, nullptr);
+            return Failure{ErrorCode::plugin, "Windows could not load DLL or dependency (error " + std::to_string(error) + ")\n" + pathUtf8(std::filesystem::path(message))};
+        }
         auto entry = reinterpret_cast<Vst2Entry>(GetProcAddress(instance->module, "VSTPluginMain"));
         if (!entry) entry = reinterpret_cast<Vst2Entry>(GetProcAddress(instance->module, "main"));
         if (!entry) return Failure{ErrorCode::invalidData, "DLL has no VST2 entry point"};

@@ -55,3 +55,11 @@ The state envelope carries a checksummed, versioned source binding, opaque bank 
 The eight recovery cases pass crash-during-state, hung capture, last-snapshot retry with an independently healthy instance, simultaneous teardown/control work, malformed requests, pending editor creation, cancelled partial startup, and a stalled offline worker. Instance-owned jobs terminate the matched helper. Control requests share one total deadline across mutex acquisition, send and receive. Stop cancels in-flight I/O and offline waits, allows a short graceful shutdown, then terminates the owned job. Hung-control and offline-stop regressions complete in roughly 150–210 ms on this machine. A failed editor offers retry of its existing binding and state.
 
 The native MIDI regression rejects source events outside the actual processing segment. Both architecture suites verify the check. The current complete debug suites pass 87 x64 and 18 x86 tests.
+
+## Standalone generator
+
+The staged JUCE application displays Nytera VST2 Wrapper, inspects sources in matched child helpers, reports PE imports and Windows loader diagnostics, accepts optional support files, previews the original editor from a packaged/extracted payload, and exports transactionally. Source inspection and generation run on an owned background worker. Cancellation terminates a stalled inspector and preserves an existing output. Destination checks protect input DLLs and runtime templates, and re-export inside a support directory excludes the previous output from its own embedded payload.
+
+GUI exports succeeded for all five supplied DLLs with PATH restricted to Windows System32. The BBE preview screenshot is `out/inspection/Nytera-BBE-preview.png`. `out/inspection/Nytera-generator.png` shows the application after a successful single-file export. Factory names and class identities match the diagnostic export path for Decapitator, Little AlterBoy, VPRE-73 and BBE. The seven conversion tests pass, and the full x64 debug suite passes 94 cases.
+
+The user requested skipping LexHall after observing an unavailable external file. Its earlier metadata/export observations remain recorded. Remaining LexHall compatibility acceptance is skipped at the user's request.

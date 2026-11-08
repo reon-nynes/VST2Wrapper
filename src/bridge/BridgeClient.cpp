@@ -179,7 +179,7 @@ Status BridgeClient::retry()
     if (parent && IsWindow(reinterpret_cast<HWND>(parent))) return openEditor(parent, scale);
     return std::monostate{};
 }
-Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path& helper, const std::filesystem::path& source)
+Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path& helper, const std::filesystem::path& source, std::function<bool()> cancelled)
 {
     std::lock_guard lifecycle(impl->lifecycle);
     {
@@ -244,7 +244,7 @@ Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path
             throw std::runtime_error("Cannot attach helper job");
         }
         impl->session = current;
-        if (epoch != impl->stopEpoch.load()) throw std::runtime_error("Helper startup cancelled");
+        if (epoch != impl->stopEpoch.load() || (cancelled && cancelled())) throw std::runtime_error("Helper startup cancelled");
         ResumeThread(thread.get());
         auto connected = current->control->accept(deadline.remaining());
         if (auto* failure = std::get_if<Failure>(&connected)) throw std::runtime_error(failure->message);

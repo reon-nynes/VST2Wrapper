@@ -25,7 +25,7 @@ std::filesystem::path relativePayloadPath(const std::string& text)
     }
     return path;
 }
-Status writePackage(const PackageInput& input, const std::filesystem::path& output)
+Status writePackage(const PackageInput& input, const std::filesystem::path& output, std::function<bool()> cancelled)
 {
     std::filesystem::path temporary;
     HANDLE update = nullptr;
@@ -65,7 +65,8 @@ Status writePackage(const PackageInput& input, const std::filesystem::path& outp
                 for (const auto& entry : std::filesystem::recursive_directory_iterator(support))
                 {
                     if (GetFileAttributesW(entry.path().c_str()) & FILE_ATTRIBUTE_REPARSE_POINT) throw std::runtime_error("Reparse support entries are unsupported");
-                    if (entry.is_regular_file() && !std::filesystem::equivalent(entry.path(), input.source)) files.push_back(entry.path());
+                    if (entry.is_regular_file() && !std::filesystem::equivalent(entry.path(), input.source)
+                        && !(std::filesystem::exists(output) && std::filesystem::equivalent(entry.path(), output))) files.push_back(entry.path());
                 }
                 std::sort(files.begin(), files.end());
                 for (const auto& file : files)
@@ -96,6 +97,7 @@ Status writePackage(const PackageInput& input, const std::filesystem::path& outp
         HANDLE completed = update;
         update = nullptr;
         if (!EndUpdateResourceW(completed, FALSE)) throw std::runtime_error("Cannot finish output resources");
+        if (cancelled && cancelled()) throw std::runtime_error("Conversion cancelled before export commit");
         if (!MoveFileExW(temporary.c_str(), std::filesystem::absolute(output).c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
             throw std::runtime_error("Cannot publish output file (it may be in use)");
         return std::monostate{};
