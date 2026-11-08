@@ -105,6 +105,7 @@ public:
     void restoreCheckpoint(uint32_t program, std::span<const float> values, uint64_t sequence);
 private:
     explicit AudioTransport(std::unique_ptr<SharedAudio>);
+    void resetTransport() noexcept;
     int submit(AudioBlockView, const TransportSnapshot&) noexcept;
     bool waitForOutput(uint32_t slot, uint64_t sequence, uint32_t frames, bool offline) noexcept;
     void reap() noexcept;

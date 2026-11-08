@@ -171,6 +171,10 @@ Result<std::unique_ptr<AudioTransport>> AudioTransport::create(const std::wstrin
 void AudioTransport::reset() noexcept
 {
     midiScratch->count = midiScratch->used = 0;
+    resetTransport();
+}
+void AudioTransport::resetTransport() noexcept
+{
     parameterScratch->count = 0;
     if (programEvent && (!programEvent->sequence || programEvent->sequence > memory->programSequence()))
     {
@@ -260,7 +264,8 @@ ProcessResult AudioTransport::process(AudioBlockView block, EventBlockView event
     for (auto* input : block.inputs) if (!input && block.samples) return mute();
     for (auto* output : block.outputs) if (!output && block.samples) return mute();
     bool playing = (transport.flags & 2) != 0;
-    if (hadTransport && ((playing && wasPlaying && transport.projectSamples != expectedProject) || playing != wasPlaying)) reset();
+    // MIDI deferred by zero-frame calls still belongs to this next audio block.
+    if (hadTransport && ((playing && wasPlaying && transport.projectSamples != expectedProject) || playing != wasPlaying)) resetTransport();
     hadTransport = true; wasPlaying = playing; expectedProject = transport.projectSamples + block.samples;
     for (const auto& event : events.input)
     {

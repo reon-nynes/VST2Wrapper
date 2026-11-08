@@ -61,7 +61,7 @@ vst_scan=2
 renderclosewhendone=4
 [audioconfig]
 mode=4
-dummy_srate=44100
+dummy_srate=48000
 dummy_blocksize=1024
 allow_sr_override=1
 "@ | Set-Content -LiteralPath "$profile/reaper.ini"

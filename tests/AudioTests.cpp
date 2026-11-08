@@ -131,6 +131,30 @@ TEST("Audio.InPlace")
         }
     }
 }
+TEST("Audio.ZeroBlockStart")
+{
+    for (bool x86 : {false, true})
+        for (bool explicitReset : {false, true})
+        {
+            AudioSession session(64, "NyteraInstrumentFixture.dll", x86);
+            std::array<std::byte, 3> on {std::byte{0x90}, std::byte{60}, std::byte{100}};
+            MidiEvent note {0, on};
+            CHECK(session.block(0, std::span(&note, 1), nullptr, nullptr, 0, 123, false) != ProcessResult::failed);
+            CHECK(session.block(0, {}, nullptr, nullptr, 0, 123, false) != ProcessResult::failed);
+            if (explicitReset) session.client.resetProcessing();
+            std::vector<int64_t> notes;
+            auto emit = [](void* context, int64_t sample, std::span<const std::byte> message)
+            {
+                if (message[0] == std::byte{0x90}) static_cast<std::vector<int64_t>*>(context)->push_back(sample);
+            };
+            CHECK(session.block(1, {}, &notes, emit) == ProcessResult::rendered);
+            CHECK(session.left[0] == (explicitReset ? 0.0f : 0.5f));
+            CHECK(notes.size() == (explicitReset ? 0 : 1));
+            if (!notes.empty()) CHECK(notes.front() == 0);
+            CHECK(session.block(1, {}, &notes, emit) == ProcessResult::rendered);
+            CHECK(notes.size() == (explicitReset ? 0 : 1));
+        }
+}
 TEST("Audio.InvalidCompletion")
 {
     for (int fault = 0; fault < 4; ++fault)

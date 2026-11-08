@@ -40,8 +40,8 @@ Modify `src/bridge/AudioTransport.h`, `src/bridge/AudioTransport.cpp` and `src/h
 
 Modify timing assumptions in `tests/ProcessorTests.cpp`, `tests/ParameterTests.cpp` and `tests/RecoveryTests.cpp`. Keep source delay notifications and recovery semantics. Update `README.md` and `docs/testing/reaper-acceptance.md` to describe synchronous transport and measured results.
 
-- [ ] Adjust legacy pipeline assertions to same-block output, including parameter changes, mode switches, saved-state retry and helper stop during rendering.
-- [ ] Run `scripts/Build.ps1` and `scripts/Verify.ps1` for Release and Debug. Expect all x86 and x64 cases to pass.
-- [ ] Run isolated REAPER audio/state/automation/recovery acceptance. Regenerate BBE with staged Release assets and verify source-only reported latency and original GUI.
-- [ ] Request one fresh whole-change review, address important findings and rerun affected tests and the complete suite.
-- [ ] Record verification and implementation decisions, commit the completed changes and provide the staged executable and regenerated BBE path.
+- [x] Adjust legacy pipeline assertions to same-block output, including parameter changes, mode switches, saved-state retry and helper stop during rendering.
+- [x] Run `scripts/Build.ps1` and `scripts/Verify.ps1` for Release and Debug. Expect all x86 and x64 cases to pass.
+- [x] Run isolated REAPER audio/state/automation/recovery acceptance. Regenerate BBE with staged Release assets and verify source-only reported latency and original GUI.
+- [x] Request one fresh whole-change review, address important findings and rerun affected tests and the complete suite.
+- [x] Record verification and implementation decisions, commit the completed changes and provide the staged executable and regenerated BBE path.
