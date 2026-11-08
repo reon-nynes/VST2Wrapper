@@ -8,12 +8,48 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 add_compile_definitions(UNICODE _UNICODE NOMINMAX WIN32_LEAN_AND_MEAN)
-add_compile_options(/W4 /permissive- /utf-8 /EHsc)
+add_compile_options(/W4 /permissive- /utf-8 /EHsc /MP6)
 include(CTest)
+include(cmake/Dependencies.cmake)
 
 add_library(NyteraCommon STATIC src/common/Manifest.cpp src/common/Files.cpp)
 target_include_directories(NyteraCommon PUBLIC src)
 target_link_libraries(NyteraCommon PUBLIC bcrypt)
+add_library(NyteraPackage STATIC src/package/Package.cpp)
+target_link_libraries(NyteraPackage PUBLIC NyteraCommon)
+
+if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+    add_library(NyteraVst3Sdk STATIC
+        "${NYTERA_VST3_SDK}/pluginterfaces/base/funknown.cpp"
+        "${NYTERA_VST3_SDK}/pluginterfaces/base/coreiids.cpp"
+        "${NYTERA_VST3_SDK}/public.sdk/source/vst/vstinitiids.cpp")
+    target_include_directories(NyteraVst3Sdk PUBLIC "${NYTERA_VST3_SDK}")
+    target_compile_definitions(NyteraVst3Sdk PRIVATE _CRT_SECURE_NO_WARNINGS)
+    add_executable(NyteraFactoryProbe tools/FactoryProbe.cpp)
+    target_link_libraries(NyteraFactoryProbe PRIVATE NyteraPackage NyteraVst3Sdk)
+    foreach(kind Effect Instrument)
+        if(kind STREQUAL "Instrument")
+            set(isSynth TRUE)
+        else()
+            set(isSynth FALSE)
+        endif()
+        juce_add_plugin(Nytera${kind}
+            COMPANY_NAME Nytera
+            PLUGIN_MANUFACTURER_CODE Nytr
+            PLUGIN_CODE Nwra
+            FORMATS VST3
+            PRODUCT_NAME "Nytera${kind}"
+            IS_SYNTH ${isSynth}
+            NEEDS_MIDI_INPUT TRUE
+            NEEDS_MIDI_OUTPUT TRUE
+            VST3_AUTO_MANIFEST FALSE
+            COPY_PLUGIN_AFTER_BUILD FALSE)
+        target_sources(Nytera${kind} PRIVATE src/plugin/Processor.cpp src/plugin/ModuleBinding.cpp)
+        target_include_directories(Nytera${kind} PUBLIC src)
+        target_compile_definitions(Nytera${kind} PUBLIC NYTERA_DYNAMIC_BINDING=1 JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
+        target_link_libraries(Nytera${kind} PRIVATE NyteraPackage juce::juce_audio_processors)
+    endforeach()
+endif()
 
 if(BUILD_TESTING)
     add_executable(NyteraTests tests/TestMain.cpp tests/ManifestTests.cpp)
@@ -22,4 +58,13 @@ if(BUILD_TESTING)
     foreach(test RoundTrip Truncated Identity PeArchitecture)
         add_test(NAME Manifest.${test} COMMAND NyteraTests Manifest.${test})
     endforeach()
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        target_sources(NyteraTests PRIVATE tests/FactoryTests.cpp)
+        target_compile_definitions(NyteraTests PRIVATE NYTERA_EFFECT_TEMPLATE="$<TARGET_FILE:NyteraEffect_VST3>")
+        target_link_libraries(NyteraTests PRIVATE NyteraPackage NyteraVst3Sdk)
+        add_dependencies(NyteraTests NyteraEffect_VST3)
+        foreach(test DistinctBindings ControllerIdentity HeadlessParameters RenameStable)
+            add_test(NAME Factory.${test} COMMAND NyteraTests Factory.${test})
+        endforeach()
+    endif()
 endif()

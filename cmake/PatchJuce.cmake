@@ -1,0 +1,7 @@
+set(patch "${PROJECT_SOURCE_DIR}/patches/juce-8.0.13-nytera-vst3.patch")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${patch}")
+execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${JUCE_SOURCE_DIR}" apply --reverse --check "${patch}" RESULT_VARIABLE alreadyApplied OUTPUT_QUIET ERROR_QUIET)
+if(NOT alreadyApplied EQUAL 0)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${JUCE_SOURCE_DIR}" apply --check "${patch}" COMMAND_ERROR_IS_FATAL ANY)
+    execute_process(COMMAND "${GIT_EXECUTABLE}" -C "${JUCE_SOURCE_DIR}" apply "${patch}" COMMAND_ERROR_IS_FATAL ANY)
+endif()

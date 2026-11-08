@@ -1,0 +1,30 @@
+#pragma once
+#include <juce_audio_processors/juce_audio_processors.h>
+#include "ModuleBinding.h"
+namespace nytera
+{
+class Processor final : public juce::AudioProcessor
+{
+public:
+    Processor();
+    const juce::String getName() const override { return juce::String::fromUTF8(moduleDisplayName()); }
+    void prepareToPlay(double, int) override {}
+    void releaseResources() override {}
+    void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    bool isBusesLayoutSupported(const BusesLayout&) const override;
+    bool hasEditor() const override { return false; }
+    juce::AudioProcessorEditor* createEditor() override { return nullptr; }
+    bool acceptsMidi() const override { return moduleBinding().midiInput; }
+    bool producesMidi() const override { return moduleBinding().midiOutput; }
+    double getTailLengthSeconds() const override { return moduleBinding().tailSeconds; }
+    int getNumPrograms() override { return 1; }
+    int getCurrentProgram() override { return 0; }
+    void setCurrentProgram(int) override {}
+    const juce::String getProgramName(int) override { return {}; }
+    void changeProgramName(int, const juce::String&) override {}
+    void getStateInformation(juce::MemoryBlock&) override {}
+    void setStateInformation(const void*, int) override {}
+private:
+    static BusesProperties makeBuses();
+};
+}
