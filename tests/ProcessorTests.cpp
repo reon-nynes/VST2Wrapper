@@ -1,6 +1,7 @@
 #include "helper/Vst2Instance.h"
 #include "Vst3Host.h"
 #include <pluginterfaces/vst/ivstprocesscontext.h>
+#include <pluginterfaces/vst/ivstparameterchanges.h>
 using namespace nytera;
 using namespace Steinberg;
 using namespace Steinberg::Vst;
@@ -71,3 +72,61 @@ template<class Sample> static void checkProcessing()
 }
 TEST("Processor.FloatEntry") { checkProcessing<float>(); }
 TEST("Processor.DoubleEntry") { checkProcessing<double>(); }
+struct TwoPoints : IParamValueQueue
+{
+    ParamID id = 0;
+    tresult PLUGIN_API queryInterface(const TUID, void** object) override { *object = nullptr; return kNoInterface; }
+    uint32 PLUGIN_API addRef() override { return 1; }
+    uint32 PLUGIN_API release() override { return 1; }
+    ParamID PLUGIN_API getParameterId() override { return id; }
+    int32 PLUGIN_API getPointCount() override { return 2; }
+    tresult PLUGIN_API getPoint(int32 index, int32& offset, ParamValue& value) override
+    {
+        if (index < 0 || index > 1) return kResultFalse;
+        offset = index == 0 ? 0 : 32;
+        value = index == 0 ? 0.25 : 0.75;
+        return kResultOk;
+    }
+    tresult PLUGIN_API addPoint(int32, ParamValue, int32&) override { return kResultFalse; }
+};
+struct OneParameter : IParameterChanges
+{
+    TwoPoints points;
+    tresult PLUGIN_API queryInterface(const TUID, void** object) override { *object = nullptr; return kNoInterface; }
+    uint32 PLUGIN_API addRef() override { return 1; }
+    uint32 PLUGIN_API release() override { return 1; }
+    int32 PLUGIN_API getParameterCount() override { return 1; }
+    IParamValueQueue* PLUGIN_API getParameterData(int32 index) override { return index == 0 ? &points : nullptr; }
+    IParamValueQueue* PLUGIN_API addParameterData(const ParamID&, int32&) override { return nullptr; }
+};
+TEST("Parameter.Resolution")
+{
+    auto path = packageProcessor("resolution");
+    auto manifest = require(readPackageManifest(path));
+    RunningProcessor loaded(path);
+    ProcessSetup setup {kOffline, kSample32, 64, 48000};
+    CHECK(loaded.processor->setupProcessing(setup) == kResultOk);
+    loaded.component->activateBus(kAudio, kInput, 0, true);
+    loaded.component->activateBus(kAudio, kOutput, 0, true);
+    CHECK(loaded.component->setActive(true) == kResultOk);
+    loaded.processor->setProcessing(true);
+    std::array<float, 64> input, left, right;
+    input.fill(1);
+    std::array<float*, 2> inputs {input.data(), input.data()}, outputs {left.data(), right.data()};
+    AudioBusBuffers in {}, out {};
+    in.numChannels = out.numChannels = 2;
+    in.channelBuffers32 = inputs.data(); out.channelBuffers32 = outputs.data();
+    OneParameter changes;
+    changes.points.id = manifest.parameters[0].vst3Id;
+    ProcessContext context {}; context.sampleRate = 48000; context.state = ProcessContext::kPlaying;
+    ProcessData data;
+    data.processMode = kOffline; data.symbolicSampleSize = kSample32; data.numSamples = 64;
+    data.numInputs = data.numOutputs = 1; data.inputs = &in; data.outputs = &out; data.processContext = &context;
+    for (int block = 0; block < 5; ++block)
+    {
+        context.projectTimeSamples = block * 64;
+        data.inputParameterChanges = block == 0 ? &changes : nullptr;
+        CHECK(loaded.processor->process(data) == kResultOk);
+        for (float sample : left) CHECK(sample == (block < 2 ? 0.0f : 0.75f));
+    }
+}

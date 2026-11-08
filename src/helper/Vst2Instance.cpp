@@ -4,6 +4,8 @@
 #include <cstring>
 #include <stdexcept>
 #include <iostream>
+#include <limits>
+#include <bit>
 namespace nytera
 {
 static void trace(const char* stage)
@@ -13,6 +15,7 @@ static void trace(const char* stage)
 }
 thread_local Vst2Instance* Vst2Instance::constructing = nullptr;
 thread_local Vst2Instance* Vst2Instance::processing = nullptr;
+thread_local Vst2Instance* Vst2Instance::applyingParameter = nullptr;
 thread_local const TransportSnapshot* Vst2Instance::processTransport = nullptr;
 thread_local EventBlockView* Vst2Instance::processEvents = nullptr;
 Result<std::unique_ptr<Vst2Instance>> Vst2Instance::open(const std::filesystem::path& path)
@@ -60,11 +63,62 @@ Result<std::unique_ptr<Vst2Instance>> Vst2Instance::open(const std::filesystem::
         trace("Setting initial block size");
         instance->dispatch(VST_EFFECT_OPCODE_SET_BLOCK_SIZE, 0, 512);
         trace("VST2 instance initialized");
+        if (effect->num_params < 0 || effect->num_params > 65536 || effect->num_inputs < 0 || effect->num_inputs > 256
+            || effect->num_outputs < 0 || effect->num_outputs > 256)
+            return Failure{ErrorCode::invalidData, "Source topology is invalid after initialization"};
+        instance->parameterSequences.resize(static_cast<size_t>(effect->num_params));
         return instance;
     }
     catch (const std::exception& error) { return Failure{ErrorCode::plugin, error.what()}; }
 }
 Vst2Instance::~Vst2Instance() { close(); }
+void Vst2Instance::publishTransport(const TransportSnapshot& snapshot) noexcept
+{
+    auto words = std::bit_cast<std::array<uint64_t, 9>>(snapshot);
+    transportSequence.fetch_add(1);
+    for (size_t i = 0; i < words.size(); ++i) transportWords[i].store(words[i]);
+    transportSequence.fetch_add(1);
+}
+bool Vst2Instance::readTransport(TransportSnapshot& snapshot) const noexcept
+{
+    for (int attempt = 0; attempt < 8; ++attempt)
+    {
+        auto before = transportSequence.load();
+        if (before == 0 || (before & 1)) continue;
+        std::array<uint64_t, 9> words;
+        for (size_t i = 0; i < words.size(); ++i) words[i] = transportWords[i].load();
+        if (transportSequence.load() == before) { snapshot = std::bit_cast<TransportSnapshot>(words); return true; }
+    }
+    return false;
+}
+Status Vst2Instance::applyParameter(const ParameterEvent& event)
+{
+    if (!effect || event.index >= static_cast<uint32_t>(effect->num_params) || !std::isfinite(event.normalized)
+        || event.normalized < 0 || event.normalized > 1 || (event.origin != 1 && event.origin != 2)
+        || event.index >= parameterSequences.size())
+        return Failure{ErrorCode::invalidData, "Invalid source parameter event"};
+    auto& lastSequence = parameterSequences[event.index];
+    // Control-thread changes may overtake an older block in the audio pipeline.
+    if (event.sequence && event.sequence <= lastSequence) return std::monostate{};
+    if (event.origin == 2 && effect->get_parameter(effect, event.index) == event.normalized)
+    { lastSequence = event.sequence; return std::monostate{}; }
+    auto* previous = applyingParameter;
+    applyingParameter = this;
+    try { effect->set_parameter(effect, event.index, event.normalized); }
+    catch (...) { applyingParameter = previous; throw; }
+    applyingParameter = previous;
+    lastSequence = event.sequence;
+    return std::monostate{};
+}
+Result<std::string> Vst2Instance::parameterDisplay(uint32_t index)
+{
+    if (!effect || index >= static_cast<uint32_t>(effect->num_params))
+        return Failure{ErrorCode::invalidData, "Parameter index is out of range"};
+    char text[1024] {};
+    dispatch(VST_EFFECT_OPCODE_PARAM_VALUE, static_cast<int32_t>(index), 0, text);
+    text[sizeof(text) - 1] = 0;
+    return std::string(text);
+}
 Result<Manifest> Vst2Instance::inspect()
 {
     trace("Inspecting VST2 metadata");
@@ -91,8 +145,7 @@ Result<Manifest> Vst2Instance::inspect()
         manifest.architecture = sizeof(void*) == 8 ? Architecture::x64 : Architecture::x86;
         manifest.kind = (effect->flags & VST_EFFECT_FLAG_INSTRUMENT) ? PluginKind::instrument : PluginKind::effect;
         manifest.initialDelay = static_cast<uint32_t>(std::max(0, effect->delay));
-        auto tail = dispatch(VST_EFFECT_OPCODE_TAIL_SAMPLES);
-        manifest.tailSeconds = tail > 1 ? static_cast<double>(tail) / config.sampleRate : 0.0;
+        manifest.tailSeconds = tailSeconds();
         for (int32_t i = 0; i < effect->num_params; ++i)
         {
             auto value = effect->get_parameter(effect, static_cast<uint32_t>(i));
@@ -120,13 +173,15 @@ Status Vst2Instance::prepare(const ProcessConfig& next)
         return Failure{ErrorCode::invalidData, "Invalid processing configuration"};
     suspend();
     config = next;
+    callbackRate = next.sampleRate;
+    callbackBlock = next.maximumBlock;
     events = std::make_unique<Vst2Events>();
     midiEvents.resize(4128);
     sysexEvents.resize(4096);
     doubleInputs.resize(size_t(effect->num_inputs) * config.maximumBlock);
     doubleOutputs.resize(size_t(effect->num_outputs) * config.maximumBlock);
     dryLatency = static_cast<uint32_t>(std::max(0, effect->delay));
-    if (uint64_t(dryLatency) * effect->num_outputs * sizeof(float) > 256 * 1024 * 1024)
+    if (uint64_t(dryLatency) * std::max(1, effect->num_outputs) * sizeof(float) > 256 * 1024 * 1024)
         return Failure{ErrorCode::unsupported, "Source bypass delay exceeds 256 MiB capacity"};
     dryDelay.assign(size_t(dryLatency) * effect->num_outputs, 0);
     dryPosition = 0;
@@ -135,7 +190,26 @@ Status Vst2Instance::prepare(const ProcessConfig& next)
     dispatch(VST_EFFECT_OPCODE_SUSPEND_RESUME, 0, 1);
     dispatch(VST_EFFECT_OPCODE_PROCESS_BEGIN);
     prepared = true;
+    return refreshLatency();
+}
+Status Vst2Instance::refreshLatency()
+{
+    auto delay = static_cast<uint32_t>(std::max(0, effect->delay));
+    if (uint64_t(delay) * std::max(1, effect->num_outputs) * sizeof(float) > 256 * 1024 * 1024)
+        return Failure{ErrorCode::unsupported, "Source bypass delay exceeds 256 MiB capacity"};
+    if (delay != dryLatency)
+    {
+        dryDelay.assign(size_t(delay) * effect->num_outputs, 0.0f);
+        dryLatency = delay;
+        dryPosition = 0;
+    }
     return std::monostate{};
+}
+double Vst2Instance::tailSeconds()
+{
+    auto tail = dispatch(VST_EFFECT_OPCODE_TAIL_SAMPLES);
+    if (tail >= INT32_MAX) return std::numeric_limits<double>::infinity();
+    return tail > 1 ? static_cast<double>(tail) / config.sampleRate : 0;
 }
 void Vst2Instance::suspend()
 {
@@ -151,6 +225,7 @@ Status Vst2Instance::process(AudioBlockView block, EventBlockView midi, const Tr
         || block.outputs.size() != static_cast<size_t>(effect->num_outputs) || midi.input.size() > 4096)
         return Failure{ErrorCode::plugin, "Source topology or processing bounds changed"};
     processing = this; processTransport = &transport; processEvents = &midi;
+    publishTransport(transport);
     try
     {
         events->count = 0;
@@ -279,10 +354,12 @@ intptr_t Vst2Instance::hostCall(int32_t opcode, int32_t index, intptr_t value, v
         {
             thread_local Vst2TimeInfo time;
             time = {};
-            time.sampleRate = config.sampleRate;
-            if (processing == this && processTransport)
+            time.sampleRate = callbackRate.load();
+            TransportSnapshot cached;
+            const auto* known = processing == this ? processTransport : (readTransport(cached) ? &cached : nullptr);
+            if (known)
             {
-                const auto& snapshot = *processTransport;
+                const auto& snapshot = *known;
                 time.samplePosition = static_cast<double>(snapshot.projectSamples);
                 time.ppq = snapshot.ppq; time.tempo = snapshot.tempo; time.barStart = snapshot.barStart;
                 time.cycleStart = snapshot.cycleStart; time.cycleEnd = snapshot.cycleEnd;
@@ -321,8 +398,8 @@ intptr_t Vst2Instance::hostCall(int32_t opcode, int32_t index, intptr_t value, v
             return 1;
         }
         case VST_HOST_OPCODE_VST_VERSION: return 2400;
-        case VST_HOST_OPCODE_GET_SAMPLE_RATE: return static_cast<intptr_t>(config.sampleRate);
-        case VST_HOST_OPCODE_GET_BLOCK_SIZE: return config.maximumBlock;
+        case VST_HOST_OPCODE_GET_SAMPLE_RATE: return static_cast<intptr_t>(callbackRate.load());
+        case VST_HOST_OPCODE_GET_BLOCK_SIZE: return callbackBlock.load();
         case VST_HOST_OPCODE_VENDOR_NAME:
         case VST_HOST_OPCODE_PRODUCT_NAME:
             if (pointer) std::memcpy(pointer, "Nytera", 7);
@@ -340,6 +417,9 @@ intptr_t Vst2Instance::hostCall(int32_t opcode, int32_t index, intptr_t value, v
             }
             return 0;
         case VST_HOST_OPCODE_AUTOMATE:
+            if (applyingParameter == this) return 1;
+            if (onNotification) onNotification({static_cast<uint32_t>(opcode), index, value, real});
+            return 1;
         case VST_HOST_OPCODE_PARAM_START_EDIT:
         case VST_HOST_OPCODE_PARAM_STOP_EDIT:
         case VST_HOST_OPCODE_IO_MODIFIED:

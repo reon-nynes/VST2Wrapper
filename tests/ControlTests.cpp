@@ -39,7 +39,7 @@ TEST("Control.VersionMismatch")
 {
     auto bytes = encodeFrame({ControlCommand::inspect, 1, false, {std::byte{42}}});
     CHECK(bytes.size() == 25);
-    bytes[4] = std::byte{2};
+    bytes[4] ^= std::byte{255};
     CHECK(std::holds_alternative<Failure>(decodeFrame(bytes)));
 }
 TEST("Control.PartialFrame")

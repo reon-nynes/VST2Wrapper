@@ -17,7 +17,7 @@ public:
     Status start(const Manifest&, const std::filesystem::path& helper, const std::filesystem::path& source);
     Result<Bytes> request(ControlCommand, std::span<const std::byte> = {}, std::chrono::milliseconds timeout = std::chrono::seconds(10));
     void stop() noexcept;
-    std::vector<HostNotification> takeNotifications();
+    Result<std::vector<HostNotification>> takeNotifications();
     uint32_t processId() const noexcept;
     std::string endpoint() const;
     Status openEditor(uint64_t parentWindow, float scale = 1.0f);
@@ -25,6 +25,10 @@ public:
     Size editorSize() const noexcept;
     Status prepare(const ProcessConfig&);
     Status releaseAudio();
+    void enqueueParameter(const ParameterEvent&) noexcept;
+    Result<ParameterDisplay> parameterDisplay(uint32_t index);
+    Result<std::vector<float>> parameterValues();
+    Status flushParameters();
     ProcessResult process(AudioBlockView, EventBlockView, const TransportSnapshot&) noexcept;
     ProcessResult process(DoubleAudioBlockView, EventBlockView, const TransportSnapshot&) noexcept;
     uint32_t latencySamples() const noexcept;

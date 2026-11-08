@@ -2,6 +2,7 @@
 #include "Control.h"
 #include "AudioTransport.h"
 #include "common/Codec.h"
+#include "common/BoundedQueue.h"
 #include <bcrypt.h>
 #include <mutex>
 #include <atomic>
@@ -15,8 +16,28 @@ struct BridgeClient::Impl
     std::atomic<uint32_t> pid {0};
     std::atomic<uint32_t> editorWidth {480}, editorHeight {320};
     std::atomic<uint32_t> totalLatency {0};
+    std::atomic<uint32_t> pipelineLatency {0};
     std::unique_ptr<AudioTransport> audio;
     uint32_t audioGeneration = 0;
+    std::unique_ptr<BoundedQueue<ParameterEvent, 8192>> parameterQueue = std::make_unique<BoundedQueue<ParameterEvent, 8192>>();
+    std::vector<ParameterEvent> parameterScratch;
+    std::atomic<bool> parameterOverflow {false};
+    uint32_t parameterCount = 0;
+    std::atomic<uint64_t> parameterSequence {0};
+    void collectParameters(EventBlockView& events)
+    {
+        parameterScratch.clear();
+        for (auto event : events.parameters)
+        {
+            if (parameterScratch.size() == 8192) { parameterOverflow = true; break; }
+            if (event.sequence == 0) event.sequence = ++parameterSequence;
+            parameterScratch.push_back(event);
+        }
+        ParameterEvent event;
+        while (parameterScratch.size() < 8192 && parameterQueue->pop(event)) parameterScratch.push_back(event);
+        events.parameters = parameterScratch;
+        if (parameterOverflow.load() && audio) InterlockedExchange(&audio->shared().header().error, 1);
+    }
     std::string pipeName;
     uint32_t sequence = 0;
     Result<Bytes> exchange(ControlCommand command, std::span<const std::byte> payload, std::chrono::milliseconds timeout)
@@ -38,7 +59,7 @@ struct BridgeClient::Impl
         return std::move(reply.payload);
     }
 };
-BridgeClient::BridgeClient() : impl(std::make_unique<Impl>()) {}
+BridgeClient::BridgeClient() : impl(std::make_unique<Impl>()) { impl->parameterScratch.reserve(8192); }
 BridgeClient::~BridgeClient() { stop(); }
 Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path& helper, const std::filesystem::path& source)
 {
@@ -47,6 +68,7 @@ Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path
     try
     {
         impl->totalLatency = manifest.initialDelay;
+        impl->parameterCount = static_cast<uint32_t>(manifest.parameters.size());
         Id128 random;
         if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(random.data()), static_cast<ULONG>(random.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
             throw std::runtime_error("Cannot generate instance ID");
@@ -121,19 +143,28 @@ void BridgeClient::stop() noexcept
     }
     catch (...) {}
 }
-std::vector<HostNotification> BridgeClient::takeNotifications()
+Result<std::vector<HostNotification>> BridgeClient::takeNotifications()
 {
-    std::vector<HostNotification> notifications;
-    auto reply = request(ControlCommand::poll);
-    if (auto* data = std::get_if<Bytes>(&reply))
+    try
     {
-        Reader reader(*data);
+        auto reply = request(ControlCommand::poll, {}, std::chrono::seconds(2));
+        if (auto* failure = std::get_if<Failure>(&reply)) return *failure;
+        Reader reader(std::get<Bytes>(reply));
+        std::vector<HostNotification> notifications;
         auto count = reader.count(8192);
         for (uint32_t i = 0; i < count; ++i)
-            notifications.push_back({reader.number<uint32_t>(), reader.number<int32_t>(), reader.number<int64_t>(), reader.real32()});
+        {
+            HostNotification event {reader.number<uint32_t>(), reader.number<int32_t>(), reader.number<int64_t>(), reader.real32()};
+            if (event.opcode == 15 && event.index > 0 && event.value > 0)
+            { impl->editorWidth = static_cast<uint32_t>(event.index); impl->editorHeight = static_cast<uint32_t>(event.value); }
+            if (event.opcode == 13 && event.value >= 0 && event.value <= INT32_MAX)
+                impl->totalLatency = impl->pipelineLatency.load() + static_cast<uint32_t>(event.value);
+            notifications.push_back(event);
+        }
         reader.finish();
+        return notifications;
     }
-    return notifications;
+    catch (const std::exception& error) { return Failure{ErrorCode::invalidData, error.what()}; }
 }
 uint32_t BridgeClient::processId() const noexcept { return impl->pid.load(); }
 std::string BridgeClient::endpoint() const { return impl->pipeName; }
@@ -158,8 +189,10 @@ void BridgeClient::closeEditor() noexcept
     try { request(ControlCommand::closeEditor, {}, std::chrono::seconds(2)); } catch (...) {}
 }
 Size BridgeClient::editorSize() const noexcept { return {impl->editorWidth.load(), impl->editorHeight.load()}; }
-Status BridgeClient::prepare(const ProcessConfig& config)
+Status BridgeClient::prepare(const ProcessConfig& requested)
 {
+    auto config = requested;
+    config.parameterCount = impl->parameterCount;
     auto name = L"Local\\NyteraAudio-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(impl->pid.load())
         + L"-" + std::to_wstring(++impl->audioGeneration);
     auto created = AudioTransport::create(name, config);
@@ -176,6 +209,7 @@ Status BridgeClient::prepare(const ProcessConfig& config)
         auto sourceLatency = response.number<uint32_t>();
         response.finish();
         impl->totalLatency = audio->latency() + sourceLatency;
+        impl->pipelineLatency = audio->latency();
         impl->audio = std::move(audio);
         return std::monostate{};
     }
@@ -183,17 +217,68 @@ Status BridgeClient::prepare(const ProcessConfig& config)
 }
 ProcessResult BridgeClient::process(AudioBlockView block, EventBlockView events, const TransportSnapshot& transport) noexcept
 {
+    impl->collectParameters(events);
     if (impl->audio) return impl->audio->process(block, events, transport);
     for (auto* output : block.outputs) std::fill_n(output, block.samples, 0.0f);
     return ProcessResult::failed;
 }
 ProcessResult BridgeClient::process(DoubleAudioBlockView block, EventBlockView events, const TransportSnapshot& transport) noexcept
 {
+    impl->collectParameters(events);
     if (impl->audio) return impl->audio->process(block, events, transport);
     for (auto* output : block.outputs) std::fill_n(output, block.samples, 0.0);
     return ProcessResult::failed;
 }
 uint32_t BridgeClient::latencySamples() const noexcept { return impl->totalLatency.load(); }
+void BridgeClient::enqueueParameter(const ParameterEvent& event) noexcept
+{
+    auto ordered = event;
+    ordered.sequence = ++impl->parameterSequence;
+    if (!impl->parameterQueue->push(ordered)) impl->parameterOverflow = true;
+}
+Result<ParameterDisplay> BridgeClient::parameterDisplay(uint32_t index)
+{
+    Writer writer;
+    writer.number(index);
+    auto reply = request(ControlCommand::display, writer.bytes, std::chrono::seconds(2));
+    if (auto* failure = std::get_if<Failure>(&reply)) return *failure;
+    try { Reader reader(std::get<Bytes>(reply)); ParameterDisplay text {reader.real32(), reader.text()}; reader.finish(); return text; }
+    catch (const std::exception& error) { return Failure{ErrorCode::invalidData, error.what()}; }
+}
+Result<std::vector<float>> BridgeClient::parameterValues()
+{
+    Writer writer; writer.number<uint32_t>(0);
+    auto reply = request(ControlCommand::parameter, writer.bytes, std::chrono::seconds(2));
+    if (auto* failure = std::get_if<Failure>(&reply)) return *failure;
+    try
+    {
+        Reader reader(std::get<Bytes>(reply));
+        auto count = reader.count(65536);
+        std::vector<float> values;
+        for (uint32_t i = 0; i < count; ++i) values.push_back(reader.real32());
+        reader.finish();
+        return values;
+    }
+    catch (const std::exception& error) { return Failure{ErrorCode::invalidData, error.what()}; }
+}
+Status BridgeClient::flushParameters()
+{
+    Writer writer;
+    std::vector<ParameterEvent> pending;
+    pending.reserve(8192);
+    ParameterEvent event;
+    while (pending.size() < 8192 && impl->parameterQueue->pop(event)) pending.push_back(event);
+    if (pending.empty()) return std::monostate{};
+    writer.number(static_cast<uint32_t>(pending.size()));
+    for (const auto& parameter : pending)
+    {
+        writer.number(parameter.index); writer.floating(parameter.normalized);
+        writer.number(parameter.origin); writer.number(parameter.sequence);
+    }
+    auto reply = request(ControlCommand::parameter, writer.bytes, std::chrono::seconds(2));
+    if (auto* failure = std::get_if<Failure>(&reply)) return *failure;
+    return std::monostate{};
+}
 Status BridgeClient::releaseAudio()
 {
     auto response = request(ControlCommand::releaseAudio);

@@ -1,5 +1,6 @@
 #include "common/Manifest.h"
 #include "Test.h"
+#include <limits>
 using namespace nytera;
 
 static Manifest example()
@@ -26,6 +27,12 @@ TEST("Manifest.RoundTrip")
     auto bytes = encodeManifest(manifest);
     CHECK(bytes.size() > 100);
     CHECK(require(decodeManifest(bytes)) == manifest);
+}
+TEST("Manifest.InfiniteTail")
+{
+    auto manifest = assignBindingIds(example());
+    manifest.tailSeconds = std::numeric_limits<double>::infinity();
+    CHECK(require(decodeManifest(encodeManifest(manifest))).tailSeconds == manifest.tailSeconds);
 }
 
 TEST("Manifest.Truncated")

@@ -8,6 +8,7 @@ struct ProcessConfig
     uint32_t maximumBlock = 512;
     uint32_t inputs = 2, outputs = 2;
     bool offline = false;
+    uint32_t parameterCount = 0;
 };
 struct HostNotification
 {
@@ -43,11 +44,21 @@ struct MidiEvent
     int64_t sample = 0;
     std::span<const std::byte> data;
 };
+struct ParameterEvent
+{
+    uint32_t index = 0, offset = 0;
+    float normalized = 0;
+    uint32_t origin = 1; // 1 is host automation, 2 mirrors a source edit into the cache.
+    uint64_t sequence = 0;
+};
+struct ParameterDisplay { float normalized = 0; std::string text; };
+static_assert(sizeof(ParameterEvent) == 24);
 struct EventBlockView
 {
     std::span<const MidiEvent> input;
     void* context = nullptr;
     void (*emit)(void*, int64_t sample, std::span<const std::byte>) = nullptr;
+    std::span<const ParameterEvent> parameters;
 };
 enum class ProcessResult { rendered, priming, underrun, failed };
 }

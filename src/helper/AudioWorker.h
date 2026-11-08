@@ -10,6 +10,7 @@ class AudioWorker
 public:
     AudioWorker(std::unique_ptr<SharedAudio>, Vst2Instance&, std::mutex&);
     ~AudioWorker();
+    void fail() { InterlockedExchange(&memory->header().error, 1); }
 private:
     void run(std::stop_token);
     std::unique_ptr<SharedAudio> memory;

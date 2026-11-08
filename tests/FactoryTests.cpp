@@ -58,7 +58,7 @@ TEST("Factory.ControllerIdentity")
     component->release();
 }
 
-TEST("Factory.HeadlessParameters")
+static void headlessParameters(bool exactCount)
 {
     auto [manifest, path] = binding(1);
     FactoryModule loaded(path);
@@ -76,6 +76,7 @@ TEST("Factory.HeadlessParameters")
     CHECK(source->connect(controller) == kResultOk);
     CHECK(controller->connect(source) == kResultOk);
     CHECK(edit->getParameterCount() >= 1);
+    if (exactCount) CHECK(edit->getParameterCount() == static_cast<int32>(manifest.parameters.size() + 1));
     Steinberg::Vst::ParameterInfo parameter;
     CHECK(edit->getParameterInfo(0, parameter) == kResultOk);
     CHECK(parameter.id == manifest.parameters[0].vst3Id);
@@ -88,6 +89,8 @@ TEST("Factory.HeadlessParameters")
     component->terminate();
     component->release();
 }
+TEST("Factory.HeadlessParameters") { headlessParameters(false); }
+TEST("Parameter.StableIds") { headlessParameters(true); }
 
 TEST("Factory.RenameStable")
 {

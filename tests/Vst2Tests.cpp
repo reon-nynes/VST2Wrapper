@@ -1,5 +1,6 @@
 #include "helper/Vst2Instance.h"
 #include "Test.h"
+#include <cmath>
 using namespace nytera;
 struct FixtureCounters { uint32_t opens, closes, earlyCallbackOk; };
 struct Fixture
@@ -23,6 +24,25 @@ TEST("Vst2.EntryCallback")
     auto manifest = require(instance->inspect());
     CHECK(manifest.displayName == "Nytera Fixture");
     CHECK(manifest.parameters.size() == 1);
+}
+TEST("Vst2.TailSemantics")
+{
+    {
+        Fixture fixture;
+        auto instance = require(Vst2Instance::open(NYTERA_FIXTURE));
+        CHECK(instance->tailSeconds() == 0);
+    }
+    {
+        Fixture fixture(512);
+        auto instance = require(Vst2Instance::open(NYTERA_FIXTURE));
+        CHECK(std::isinf(instance->tailSeconds()));
+    }
+    {
+        Fixture fixture(4096);
+        auto instance = require(Vst2Instance::open(NYTERA_FIXTURE));
+        require(instance->prepare({48000, 64, 2, 2, false}));
+        CHECK(instance->tailSeconds() == 1);
+    }
 }
 TEST("Vst2.InvalidDll")
 {

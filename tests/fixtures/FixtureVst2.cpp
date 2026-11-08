@@ -4,6 +4,7 @@
 #include <atomic>
 #include <cwchar>
 #include <array>
+#include <cstdio>
 
 // Independent pointer-sized callback declaration pins the x86 calling ABI.
 using CanonicalHost = intptr_t (__cdecl*)(vst_effect_t*, int32_t, int32_t, intptr_t, void*, float);
@@ -67,6 +68,25 @@ static LRESULT CALLBACK editorProcedure(HWND window, UINT message, WPARAM wParam
         instance->host(&instance->effect, 15, 400, 200, nullptr, 0);
         return 0;
     }
+    if (instance && message == WM_COMMAND && LOWORD(wParam) == 103)
+    {
+        instance->effect.num_outputs = 3;
+        instance->host(&instance->effect, 13, 0, 0, nullptr, 0);
+        return 0;
+    }
+    if (instance && message == WM_COMMAND && LOWORD(wParam) == 104)
+    {
+        instance->effect.delay = 32;
+        instance->host(&instance->effect, 13, 0, 0, nullptr, 0);
+        return 0;
+    }
+    if (instance && message == WM_COMMAND && LOWORD(wParam) == 106)
+    {
+        instance->host(&instance->effect, 43, 0, 0, nullptr, 0);
+        instance->gain = 0.65f;
+        instance->host(&instance->effect, 0, 0, 0, nullptr, 0.65f);
+        return 0;
+    }
     if (instance && message == WM_PAINT)
     {
         PAINTSTRUCT paint;
@@ -96,7 +116,12 @@ static intptr_t __cdecl control(vst_effect_t* effect, int32_t opcode, int32_t in
         case VST_EFFECT_OPCODE_VENDOR_NAME: return copyText(pointer, "Nytera");
         case VST_EFFECT_OPCODE_PARAM_NAME: return copyText(pointer, index == 0 ? "Gain" : "Mode");
         case VST_EFFECT_OPCODE_PARAM_LABEL: return copyText(pointer, "");
-        case VST_EFFECT_OPCODE_PARAM_VALUE: return copyText(pointer, "0.5");
+        case VST_EFFECT_OPCODE_PARAM_VALUE:
+        {
+            char text[32];
+            std::snprintf(text, sizeof(text), "%.2f", instance.gain.load());
+            return copyText(pointer, text);
+        }
         case VST_EFFECT_OPCODE_PARAM_IS_AUTOMATABLE: return 1;
         case VST_EFFECT_OPCODE_CATEGORY: return (instance.flags & 2) ? VST_EFFECT_CATEGORY_CONTAINER : 1;
         case VST_EFFECT_OPCODE_EDITOR_GET_RECT: *static_cast<vst_rect_t**>(pointer) = &instance.rectangle; return 1;
@@ -116,6 +141,12 @@ static intptr_t __cdecl control(vst_effect_t* effect, int32_t opcode, int32_t in
             if (instance.editor) { DestroyWindow(instance.editor); instance.editor = nullptr; }
             return 1;
         case VST_EFFECT_OPCODE_VST_VERSION: return 2400;
+        case VST_EFFECT_OPCODE_TAIL_SAMPLES: return (instance.flags & 512) ? INT32_MAX : (instance.flags & 4096) ? 48000 : 1;
+        case 50: // effVendorSpecific is used only by the controlled fixture.
+        {
+            auto* time = reinterpret_cast<CanonicalTime*>(instance.host(effect, 7, 0, 0xffff, nullptr, 0));
+            return time ? static_cast<intptr_t>(index == 1 ? time->tempo : time->samplePosition) : -1;
+        }
         case VST_EFFECT_OPCODE_SUPPORTS:
             return (instance.flags & 16) && pointer
                 && (std::strcmp(static_cast<const char*>(pointer), "receiveVstMidiEvent") == 0 || std::strcmp(static_cast<const char*>(pointer), "sendVstMidiEvent") == 0) ? 1 : 0;
@@ -172,7 +203,9 @@ static void __cdecl process(vst_effect_t* effect, const float* const* inputs, fl
 }
 static void __cdecl setParameter(vst_effect_t* effect, uint32_t, float value)
 {
-    static_cast<Instance*>(effect->effect_internal)->gain = value;
+    auto* instance = static_cast<Instance*>(effect->effect_internal);
+    instance->gain = value;
+    instance->host(effect, 0, 0, 0, nullptr, value);
 }
 static float __cdecl getParameter(vst_effect_t* effect, uint32_t)
 {

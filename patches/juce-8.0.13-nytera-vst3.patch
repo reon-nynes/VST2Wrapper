@@ -53,7 +53,7 @@ index 231a9f4..b6e5102 100644
                       includeFlagsAndCategory ? JucePlugin_Vst3Category : "",
                       JucePlugin_Manufacturer,
 diff --git a/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp b/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp
-index 3c0ca06..8bf80f3 100644
+index 3c0ca06..7f59aa6 100644
 --- a/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp
 +++ b/modules/juce_audio_plugin_client/juce_audio_plugin_client_VST3.cpp
 @@ -736,6 +736,11 @@ private:
@@ -68,3 +68,68 @@ index 3c0ca06..8bf80f3 100644
          const auto juceParamID = LegacyAudioParameter::getParamID (param, false);
  
         #if JUCE_FORCE_USE_LEGACY_PARAM_IDS
+@@ -1258,6 +1263,11 @@ public:
+                                                     [[maybe_unused]] Vst::ParamID& resultID) override
+     {
+        #if JUCE_VST3_EMULATE_MIDI_CC_WITH_PARAMETERS
++       #ifdef NYTERA_DYNAMIC_BINDING
++        if (! nytera::moduleBinding().midiInput || busIndex != 0 || channel < 0 || channel >= numMIDIChannels
++            || midiControllerNumber < 0 || midiControllerNumber >= Vst::kCountCtrlNumber)
++            return kResultFalse;
++       #endif
+         resultID = midiControllerToParameter[channel][midiControllerNumber];
+         return kResultTrue; // Returning false makes some hosts stop asking for further MIDI Controller Assignments
+        #else
+@@ -1287,6 +1297,9 @@ public:
+ 
+     inline bool isMidiControllerParamID (Vst::ParamID paramID) const noexcept
+     {
++       #ifdef NYTERA_DYNAMIC_BINDING
++        if (! nytera::moduleBinding().midiInput) return false;
++       #endif
+         return (paramID >= parameterToMidiControllerOffset
+                     && isPositiveAndBelow (paramID - parameterToMidiControllerOffset,
+                                            static_cast<Vst::ParamID> (numElementsInArray (parameterToMidiController))));
+@@ -1770,7 +1783,10 @@ private:
+             parameterToMidiControllerOffset = static_cast<Vst::ParamID> (audioProcessor->isUsingManagedParameters() ? JuceAudioProcessor::paramMidiControllerOffset
+                                                                                                                     : parameters.getParameterCount());
+ 
+-            initialiseMidiControllerMappings();
++           #ifdef NYTERA_DYNAMIC_BINDING
++            if (nytera::moduleBinding().midiInput)
++           #endif
++                initialiseMidiControllerMappings();
+            #endif
+ 
+             audioProcessorChanged (pluginInstance, ChangeDetails().withParameterInfoChanged (true));
+@@ -3070,12 +3086,20 @@ public:
+         {
+            #if JucePlugin_WantsMidiInput
+             if (dir == Vst::kInput)
++               #ifdef NYTERA_DYNAMIC_BINDING
++                return nytera::moduleBinding().midiInput ? 1 : 0;
++               #else
+                 return 1;
++               #endif
+            #endif
+ 
+            #if JucePlugin_ProducesMidiOutput
+             if (dir == Vst::kOutput)
++               #ifdef NYTERA_DYNAMIC_BINDING
++                return nytera::moduleBinding().midiOutput ? 1 : 0;
++               #else
+                 return 1;
++               #endif
+            #endif
+         }
+ 
+@@ -3085,6 +3109,9 @@ public:
+     tresult PLUGIN_API getBusInfo (Vst::MediaType type, Vst::BusDirection dir,
+                                    Steinberg::int32 index, Vst::BusInfo& info) override
+     {
++       #ifdef NYTERA_DYNAMIC_BINDING
++        if (type == Vst::kEvent && (index < 0 || index >= getBusCount (type, dir))) return kResultFalse;
++       #endif
+         if (type == Vst::kAudio)
+         {
+             if (index < 0 || index >= getNumAudioBuses (dir == Vst::kInput))

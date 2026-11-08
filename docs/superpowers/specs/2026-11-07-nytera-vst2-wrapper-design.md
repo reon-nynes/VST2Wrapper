@@ -151,7 +151,7 @@ The user supplied four DLLs in `vst2demo/`. PE headers and Windows version resou
 | `LexHall.dll` | x64, 64-bit | LexHallVST | Harman International | 1.3.8 |
 | `LittleAlterBoy.dll` | x64, 64-bit | Little AlterBoy | SoundToys | 5.0.1 |
 | `VPRE-73.dll` | x64, 64-bit | VPRE-73 | Black Rooster Audio | 2.5 BUILD 264 |
-| `BBE Sonic Maximizer.dll` | x86, 32-bit | D82 Sonic Maximizer, runtime-reported | Runtime inspection pending vendor record | No PE version resource |
+| `BBE Sonic Maximizer.dll` | x86, 32-bit | D82 Sonic Maximizer, runtime-reported | Nomad Factory, runtime-reported | No PE version resource |
 
 Use Decapitator for the first cross-architecture editor and processing checks. Start the x64 path with VPRE-73, then exercise the other two x64 plugins for additional editor, state, and dependency behavior. This test order is an assistant proposal.
 

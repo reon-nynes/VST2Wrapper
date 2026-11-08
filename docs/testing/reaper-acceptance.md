@@ -16,7 +16,7 @@ The native factory suite passes distinct generated identities, matching controll
 | LexHall 1.3.8 | x64 | Pass, 53 parameters, 2 in / 2 out | Reports 780 x 540 | Pending |
 | Little AlterBoy 5.0.1 | x64 | Pass, 7 parameters, 2 in / 2 out | Reports 870 x 283 | Pending |
 | VPRE-73 2.5 BUILD 264 | x64 | Pass, 6 parameters, 2 in / 2 out | Direct bridge display and reopen pass, lock overlay visible | Pending |
-| BBE D82 Sonic Maximizer | x86 | Pass, 5 parameters, 2 in / 2 out | Direct bridge open/close/reopen pass, reports 800 x 160 | Pending |
+| BBE D82 Sonic Maximizer | x86 | Pass, Nomad Factory, 5 parameters, 2 in / 2 out | Original editor visually verified, direct bridge open/close/reopen pass, 800 x 160 | Pending |
 
 Versions come from PE resources. All four sources have now loaded and completed runtime metadata inspection through matching helpers. Editor dimensions are source-reported. Interaction, processing, and recall checks follow in later tasks. LexHall exceeded the initial 15-second inspection deadline on its first attempt and succeeded when allowed to finish. A timed successful initialization took 33.58 seconds, so startup and inspection use a 60-second deadline.
 
@@ -28,8 +28,18 @@ The seven package cases pass relocation with the original fixture DLL removed, r
 
 ## Audio and event translation
 
-The current debug suite passes 47 x64 cases and 13 x86 native cases. Prepared bridge callbacks perform zero counted heap allocations. Tests cover block lengths 0, 1, 63, 64, 127, 256, and 511, transport validity, stopped position, tempo changes within a quantum, seeks, held-note release, bypass latency, double-input conversion, suspend/resume, and ordered offline completion. MIDI and a 64 KiB SysEx message round-trip through both helper architectures.
+The current debug suite passes 62 x64 cases and 15 x86 native cases. Prepared bridge callbacks perform zero counted heap allocations, including parameter changes. Tests cover block lengths 0, 1, 63, 64, 127, 256, and 511, transport validity, stopped position, tempo changes within a quantum, seeks, held-note release, bypass latency, double-input conversion, suspend/resume, and ordered offline completion. MIDI and a 64 KiB SysEx message round-trip through both helper architectures.
 
 The pipeline reports `2 * nextPowerOfTwo(maximumBlock) + sourceLatency`. With a 64-sample maximum and a 16-sample source delay, the measured impulse occurs at sample 144. With a 512-sample maximum it occurs at sample 1040. Bypass preserves the same reported delay. Both normal VST3 processing entry points pass native COM lifecycle tests. Float64 host buffers convert through the float32 bridge, so the transport's precision is float32.
 
 `tests/reaper/Audio.lua` passes in portable REAPER 7.85 x64 with its dedicated Dummy Audio profile. The embedded x86 delay fixture renders an input impulse at sample 12000 with amplitude 0.4 after REAPER compensation. The x64 MIDI fixture renders exactly 12000 nonzero samples from 12000 through 23999 at amplitude 0.5. Both stereo channels match. Real-time playback meters observe the expected 0.4 and 0.5 peaks. The script verifies every output sample of both 48000-frame offline WAV files. Results are recorded in `out/reaper-test/audio-result.txt`.
+
+## Parameters and host information
+
+The 13 parameter cases pass stable source IDs, runtime MIDI capability filtering, native and VST3 controller/editor gesture delivery, setter-echo suppression, source formatting, block-boundary changes, stale-event rejection, concurrent callback queues, editor-close gesture completion, dynamic latency, UI-side transport timing, and recoverable topology-change detection. Sources without MIDI input expose their original parameters and VST3's required bypass parameter. MIDI sources also expose JUCE's internal MIDI-controller mappings.
+
+`Parameter.Resolution` supplies two VST3 automation points in one 64-sample host block. The pinned JUCE adapter applies the last point to the whole block. Automation resolution is therefore one host block. The bridge preserves that block boundary when combining smaller host blocks into a quantum. Source formatting is cached off the audio thread for the current value. Arbitrary-value formatting and text entry use normalized fallback values.
+
+`tests/reaper/Automation.lua` records an edit from the original x86 fixture editor in REAPER write mode, then closes the editor and renders the resulting envelope. Every stereo sample in the checked initial and changed plateaus matches amplitudes 0.4 and 0.6. The recorded parameter ID remains the source parameter ID. `out/reaper-test/automation-result.txt` records both passing stages. The bootstrap defers GUI work until REAPER's event loop is running. Each test launch uses one dedicated-profile process.
+
+The full BBE interface is visible in `out/inspection/BBE Sonic Maximizer-editor.png`. Its editor and metadata checks pass with the current helper. Vendor-specific automation, audio, and state acceptance will run from the completed application assets in the final acceptance pass.

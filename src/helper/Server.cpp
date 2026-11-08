@@ -4,6 +4,7 @@
 #include "AudioWorker.h"
 #include "bridge/Control.h"
 #include "common/Codec.h"
+#include "common/BoundedQueue.h"
 #include <mutex>
 #include <thread>
 #include <atomic>
@@ -15,12 +16,11 @@ class HelperServer
 public:
     HelperServer(Control channel, std::string token) : channel(std::move(channel)), token(std::move(token))
     {
-        notifications.reserve(8192);
     }
     ~HelperServer()
     {
-        if (instance) instance->onNotification = {};
         audio.reset();
+        if (instance) instance->onNotification = {};
         editor.reset();
         instance.reset();
     }
@@ -55,6 +55,36 @@ public:
         return 0;
     }
 private:
+    void postNotification(HostNotification event)
+    {
+        if (event.opcode == VST_HOST_OPCODE_EDITOR_RESIZE && event.index > 0 && event.value > 0)
+            pendingSize = (uint64_t(static_cast<uint32_t>(event.index)) << 32) | static_cast<uint32_t>(event.value);
+        if (event.opcode == VST_HOST_OPCODE_PARAM_START_EDIT || event.opcode == VST_HOST_OPCODE_PARAM_STOP_EDIT)
+        {
+            if (event.index < 0 || static_cast<size_t>(event.index) >= actual.parameters.size()) return;
+            auto& active = activeGestures[event.index];
+            if (event.opcode == VST_HOST_OPCODE_PARAM_START_EDIT)
+            {
+                uint64_t id = ++gestureSequence, empty = 0;
+                if (!active.compare_exchange_strong(empty, id)) return;
+                event.value = static_cast<int64_t>(id);
+            }
+            else
+            {
+                event.value = static_cast<int64_t>(active.exchange(0));
+                if (!event.value) return;
+            }
+        }
+        if (!notifications->push(event)) notificationOverflow = true;
+    }
+    void closeGestures()
+    {
+        for (uint32_t index = 0; index < actual.parameters.size(); ++index)
+        {
+            auto id = activeGestures[index].exchange(0);
+            if (id && !notifications->push({44, static_cast<int32_t>(index), static_cast<int64_t>(id), 0})) notificationOverflow = true;
+        }
+    }
     Frame handle(Frame request)
     {
         Frame response {request.command, request.requestId, false, {}};
@@ -81,13 +111,10 @@ private:
                     || actual.architecture != expected.architecture || actual.parameters.size() != expected.parameters.size()
                     || actual.inputs.size() != expected.inputs.size() || actual.outputs.size() != expected.outputs.size())
                     throw Failure{ErrorCode::identity, "Source plugin does not match embedded binding"};
-                instance->onNotification = [this](const HostNotification& event)
-                {
-                    if (event.opcode == VST_HOST_OPCODE_EDITOR_RESIZE && event.index > 0 && event.value > 0)
-                        pendingSize = (uint64_t(static_cast<uint32_t>(event.index)) << 32) | static_cast<uint32_t>(event.value);
-                    std::lock_guard lock(notificationMutex);
-                    if (notifications.size() < 8192) notifications.push_back(event);
-                };
+                activeGestures = std::make_unique<std::atomic<uint64_t>[]>(actual.parameters.size());
+                closedGestures.resize(actual.parameters.size());
+                publishedGestures.resize(actual.parameters.size());
+                instance->onNotification = [this](const HostNotification& event) { postNotification(event); };
                 response.payload = encodeManifest(actual);
                 return response;
             }
@@ -111,7 +138,7 @@ private:
                     response.payload = std::move(writer.bytes);
                     break;
                 }
-                case ControlCommand::closeEditor: editor.reset(); break;
+                case ControlCommand::closeEditor: editor.reset(); closeGestures(); break;
                 case ControlCommand::releaseAudio:
                     audio.reset();
                     instance->suspend();
@@ -121,6 +148,7 @@ private:
                     Reader reader(request.payload);
                     auto name = utf8Path(reader.text()).wstring();
                     ProcessConfig config;
+                    config.parameterCount = static_cast<uint32_t>(actual.parameters.size());
                     config.sampleRate = reader.real64(); config.maximumBlock = reader.number<uint32_t>();
                     config.inputs = reader.number<uint32_t>(); config.outputs = reader.number<uint32_t>(); config.offline = reader.boolean();
                     reader.finish();
@@ -142,11 +170,45 @@ private:
                 }
                 case ControlCommand::poll:
                 {
-                    std::vector<HostNotification> pending;
+                    if (notificationOverflow) throw Failure{ErrorCode::plugin, "Source notification queue overflow"};
+                    std::lock_guard lock(sourceMutex);
+                    auto* effect = instance->native();
+                    if (effect->num_inputs != static_cast<int32_t>(actual.inputs.size()) || effect->num_outputs != static_cast<int32_t>(actual.outputs.size())
+                        || effect->num_params != static_cast<int32_t>(actual.parameters.size()))
                     {
-                        std::lock_guard lock(notificationMutex);
-                        pending.swap(notifications);
-                        notifications.reserve(8192);
+                        if (audio) audio->fail();
+                        throw Failure{ErrorCode::unsupported, "Source topology changed. Reopen the same conversion to retry."};
+                    }
+                    std::vector<HostNotification> pending;
+                    HostNotification notification;
+                    uint32_t drained = 0;
+                    while (drained++ < 8192 && notifications->pop(notification))
+                    {
+                        if (notification.opcode == 43 || notification.opcode == 44)
+                        {
+                            auto index = static_cast<uint32_t>(notification.index);
+                            if (index >= closedGestures.size()) continue;
+                            auto id = static_cast<uint64_t>(notification.value);
+                            if (notification.opcode == 43)
+                            {
+                                if (id <= closedGestures[index]) continue;
+                                publishedGestures[index] = id;
+                            }
+                            else
+                            {
+                                closedGestures[index] = std::max(closedGestures[index], id);
+                                if (publishedGestures[index] != id) continue;
+                                publishedGestures[index] = 0;
+                            }
+                        }
+                        if (notification.opcode == VST_HOST_OPCODE_IO_MODIFIED)
+                        {
+                            auto refreshed = instance->refreshLatency();
+                            if (auto* failure = std::get_if<Failure>(&refreshed)) throw *failure;
+                            notification.value = std::max(0, effect->delay);
+                            notification.normalized = static_cast<float>(instance->tailSeconds());
+                        }
+                        pending.push_back(notification);
                     }
                     Writer writer;
                     writer.number(static_cast<uint32_t>(pending.size()));
@@ -155,6 +217,38 @@ private:
                         writer.number(event.opcode); writer.number(event.index); writer.number(event.value); writer.floating(event.normalized);
                     }
                     response.payload = std::move(writer.bytes);
+                    break;
+                }
+                case ControlCommand::parameter:
+                {
+                    Reader reader(request.payload);
+                    auto count = reader.count(8192);
+                    std::vector<ParameterEvent> parameters;
+                    for (uint32_t i = 0; i < count; ++i)
+                        parameters.push_back({reader.number<uint32_t>(), 0, reader.real32(), reader.number<uint32_t>(), reader.number<uint64_t>()});
+                    reader.finish();
+                    std::lock_guard lock(sourceMutex);
+                    for (const auto& event : parameters)
+                    {
+                        auto applied = instance->applyParameter(event);
+                        if (auto* failure = std::get_if<Failure>(&applied)) throw *failure;
+                    }
+                    Writer writer;
+                    writer.number(static_cast<uint32_t>(actual.parameters.size()));
+                    for (uint32_t i = 0; i < actual.parameters.size(); ++i) writer.floating(instance->native()->get_parameter(instance->native(), i));
+                    response.payload = std::move(writer.bytes);
+                    break;
+                }
+                case ControlCommand::display:
+                {
+                    Reader reader(request.payload);
+                    auto index = reader.number<uint32_t>(); reader.finish();
+                    std::lock_guard lock(sourceMutex);
+                    auto text = instance->parameterDisplay(index);
+                    if (auto* failure = std::get_if<Failure>(&text)) throw *failure;
+                    Writer writer;
+                    writer.floating(instance->native()->get_parameter(instance->native(), index));
+                    writer.text(std::get<std::string>(text)); response.payload = std::move(writer.bytes);
                     break;
                 }
                 default: throw Failure{ErrorCode::unsupported, "Unsupported helper command"};
@@ -184,8 +278,11 @@ private:
     std::mutex sourceMutex;
     Manifest expected, actual;
     bool running = true;
-    std::mutex notificationMutex;
-    std::vector<HostNotification> notifications;
+    std::unique_ptr<BoundedQueue<HostNotification, 8192>> notifications = std::make_unique<BoundedQueue<HostNotification, 8192>>();
+    std::atomic<bool> notificationOverflow {false};
+    std::unique_ptr<std::atomic<uint64_t>[]> activeGestures;
+    std::vector<uint64_t> closedGestures, publishedGestures;
+    std::atomic<uint64_t> gestureSequence {0};
     std::atomic<uint64_t> pendingSize {0};
     std::chrono::steady_clock::time_point nextIdle {};
 };

@@ -26,12 +26,19 @@ struct SharedTransport
     std::array<TransportMarker, 4096> markers;
     bool valid(uint32_t quantum, int64_t start) const noexcept;
 };
+struct SharedParameters
+{
+    uint32_t count = 0, reserved = 0;
+    std::array<ParameterEvent, 8192> events;
+    bool push(ParameterEvent) noexcept;
+    bool valid(uint32_t quantum) const noexcept;
+};
 static_assert(sizeof(TransportMarker) == 80);
 struct alignas(64) SharedAudioHeader
 {
     uint32_t magic, version, quantum, inputs, outputs, slots;
     volatile LONG generation, error, underruns;
-    uint32_t reserved[7];
+    uint32_t parameterCount, reserved[6];
 };
 struct alignas(64) AudioSlotHeader
 {
@@ -60,6 +67,7 @@ public:
     SharedMidi& inputMidi(uint32_t slot) const;
     SharedMidi& outputMidi(uint32_t slot) const;
     SharedTransport& transportMarkers(uint32_t slot) const;
+    SharedParameters& parameters(uint32_t slot) const;
     HANDLE readyEvent() const { return ready.get(); }
     HANDLE doneEvent() const { return done.get(); }
     const ProcessConfig config;
@@ -70,7 +78,7 @@ private:
     static Result<std::unique_ptr<SharedAudio>> map(const std::wstring&, const ProcessConfig&, bool create);
     void* view = nullptr;
     Handle mapping, ready, done;
-    size_t inputOffset, outputOffset, inputMidiOffset, outputMidiOffset, transportOffset, slotBytes, totalBytes;
+    size_t inputOffset, outputOffset, inputMidiOffset, outputMidiOffset, transportOffset, parameterOffset, slotBytes, totalBytes;
 };
 
 class AudioTransport
@@ -92,6 +100,10 @@ private:
     std::vector<float> inputScratch, precisionInput, precisionOutput;
     std::unique_ptr<SharedMidi> midiScratch;
     std::unique_ptr<SharedTransport> transportScratch;
+    std::unique_ptr<SharedParameters> parameterScratch;
+    std::vector<float> parameterValues;
+    std::vector<uint8_t> parameterSeen;
+    std::vector<uint64_t> parameterSequences;
     TransportSnapshot inputTransport;
     int64_t clock = 0, epoch = 0, expectedProject = 0;
     uint64_t outputSequence = UINT64_MAX;

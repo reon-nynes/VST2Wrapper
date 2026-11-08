@@ -35,18 +35,36 @@ bool SharedTransport::valid(uint32_t quantum, int64_t start) const noexcept
     return true;
 }
 static size_t alignUp(size_t value, size_t alignment) { return (value + alignment - 1) & ~(alignment - 1); }
+bool SharedParameters::push(ParameterEvent event) noexcept
+{
+    if (count >= events.size()) return false;
+    uint32_t index = count;
+    while (index > 0 && events[index - 1].offset > event.offset) { events[index] = events[index - 1]; --index; }
+    events[index] = event;
+    ++count;
+    return true;
+}
+bool SharedParameters::valid(uint32_t quantum) const noexcept
+{
+    if (count > events.size()) return false;
+    for (uint32_t i = 0; i < count; ++i)
+        if (events[i].offset >= quantum || !std::isfinite(events[i].normalized) || events[i].normalized < 0 || events[i].normalized > 1
+            || (events[i].origin != 1 && events[i].origin != 2) || (i > 0 && events[i - 1].offset > events[i].offset)) return false;
+    return true;
+}
 SharedAudio::SharedAudio(std::wstring name, ProcessConfig config)
     : config(config), quantum(std::bit_ceil(config.maximumBlock)), name(std::move(name))
 {
     if (!std::isfinite(config.sampleRate) || config.sampleRate < 1000 || config.sampleRate > 768000
-        || config.maximumBlock == 0 || config.maximumBlock > 65536 || config.inputs > 256 || config.outputs > 256)
+        || config.maximumBlock == 0 || config.maximumBlock > 65536 || config.inputs > 256 || config.outputs > 256 || config.parameterCount > 65536)
         throw std::runtime_error("Invalid audio transport configuration");
     inputOffset = sizeof(AudioSlotHeader);
     outputOffset = inputOffset + size_t(config.inputs) * quantum * sizeof(float);
     inputMidiOffset = alignUp(outputOffset + size_t(config.outputs) * quantum * sizeof(float), alignof(SharedMidi));
     outputMidiOffset = inputMidiOffset + sizeof(SharedMidi);
     transportOffset = outputMidiOffset + sizeof(SharedMidi);
-    slotBytes = alignUp(transportOffset + sizeof(SharedTransport), 64);
+    parameterOffset = transportOffset + sizeof(SharedTransport);
+    slotBytes = alignUp(parameterOffset + sizeof(SharedParameters), 64);
     totalBytes = sizeof(SharedAudioHeader) + audioSlotCount * slotBytes;
     if (totalBytes > 256 * 1024 * 1024) throw std::runtime_error("Audio transport exceeds 256 MiB capacity");
 }
@@ -75,12 +93,13 @@ Result<std::unique_ptr<SharedAudio>> SharedAudio::map(const std::wstring& name, 
         {
             std::memset(result->view, 0, result->totalBytes);
             auto& header = result->header();
-            header.magic = 0x4154594e; header.version = 2; header.quantum = result->quantum;
+            header.magic = 0x4154594e; header.version = 4; header.quantum = result->quantum;
             header.inputs = config.inputs; header.outputs = config.outputs; header.slots = audioSlotCount; header.generation = 1;
+            header.parameterCount = config.parameterCount;
         }
         auto& header = result->header();
-        if (header.magic != 0x4154594e || header.version != 2 || header.quantum != result->quantum
-            || header.inputs != config.inputs || header.outputs != config.outputs || header.slots != audioSlotCount)
+        if (header.magic != 0x4154594e || header.version != 4 || header.quantum != result->quantum
+            || header.inputs != config.inputs || header.outputs != config.outputs || header.slots != audioSlotCount || header.parameterCount != config.parameterCount)
             throw std::runtime_error("Incompatible audio mapping layout");
         return result;
     }
@@ -95,13 +114,18 @@ float* SharedAudio::output(uint32_t index, uint32_t channel) const { return rein
 SharedMidi& SharedAudio::inputMidi(uint32_t index) const { return *reinterpret_cast<SharedMidi*>(reinterpret_cast<std::byte*>(&slot(index)) + inputMidiOffset); }
 SharedMidi& SharedAudio::outputMidi(uint32_t index) const { return *reinterpret_cast<SharedMidi*>(reinterpret_cast<std::byte*>(&slot(index)) + outputMidiOffset); }
 SharedTransport& SharedAudio::transportMarkers(uint32_t index) const { return *reinterpret_cast<SharedTransport*>(reinterpret_cast<std::byte*>(&slot(index)) + transportOffset); }
+SharedParameters& SharedAudio::parameters(uint32_t index) const { return *reinterpret_cast<SharedParameters*>(reinterpret_cast<std::byte*>(&slot(index)) + parameterOffset); }
 
 AudioTransport::AudioTransport(std::unique_ptr<SharedAudio> shared)
-    : memory(std::move(shared)), midiScratch(std::make_unique<SharedMidi>()), transportScratch(std::make_unique<SharedTransport>())
+    : memory(std::move(shared)), midiScratch(std::make_unique<SharedMidi>()), transportScratch(std::make_unique<SharedTransport>()),
+      parameterScratch(std::make_unique<SharedParameters>())
 {
     inputScratch.resize(size_t(memory->config.inputs) * memory->quantum);
     precisionInput.resize(size_t(memory->config.inputs) * memory->config.maximumBlock);
     precisionOutput.resize(size_t(memory->config.outputs) * memory->config.maximumBlock);
+    parameterValues.resize(memory->config.parameterCount);
+    parameterSeen.resize(memory->config.parameterCount);
+    parameterSequences.resize(memory->config.parameterCount);
 }
 Result<std::unique_ptr<AudioTransport>> AudioTransport::create(const std::wstring& name, const ProcessConfig& config)
 {
@@ -116,6 +140,10 @@ void AudioTransport::reset() noexcept
     filled = 0;
     midiScratch->count = midiScratch->used = 0;
     transportScratch->count = 0;
+    parameterScratch->count = 0;
+    for (uint32_t index = 0; index < parameterSeen.size(); ++index)
+        if (parameterSeen[index] && !parameterScratch->push({index, 0, parameterValues[index], 2, parameterSequences[index]}))
+            InterlockedExchange(&memory->header().error, 1);
     outputSequence = UINT64_MAX;
     outputSlot = -1;
     ++generation;
@@ -155,6 +183,10 @@ bool AudioTransport::submit() noexcept
         markers.count = transportScratch->count;
         std::copy_n(transportScratch->markers.data(), markers.count, markers.markers.data());
         transportScratch->count = 0;
+        auto& parameters = memory->parameters(i);
+        parameters.count = parameterScratch->count;
+        std::copy_n(parameterScratch->events.data(), parameters.count, parameters.events.data());
+        parameterScratch->count = 0;
         midiScratch->count = midiScratch->used = 0;
         filled = 0;
         InterlockedExchange(&slot.state, 1);
@@ -206,9 +238,25 @@ ProcessResult AudioTransport::process(AudioBlockView block, EventBlockView event
     }
     for (const auto& event : events.input)
         if (event.sample < clock || event.sample >= clock + std::max<uint32_t>(block.samples, 1)) return mute();
+    for (const auto& event : events.parameters)
+    {
+        if (event.index >= parameterValues.size() || event.offset >= std::max<uint32_t>(block.samples, 1)
+            || !std::isfinite(event.normalized) || event.normalized < 0 || event.normalized > 1 || (event.origin != 1 && event.origin != 2)) return mute();
+        if (!event.sequence || event.sequence >= parameterSequences[event.index])
+        {
+            parameterValues[event.index] = event.normalized;
+            parameterSequences[event.index] = event.sequence;
+        }
+        parameterSeen[event.index] = 1;
+    }
     if (block.samples == 0)
     {
         for (const auto& event : events.input) if (!midiScratch->push(event.sample, event.data)) return mute();
+        for (auto event : events.parameters)
+        {
+            event.offset = filled;
+            if (!parameterScratch->push(event)) return mute();
+        }
         return ProcessResult::priming;
     }
     bool rendered = false, underrun = false;
@@ -245,6 +293,12 @@ ProcessResult AudioTransport::process(AudioBlockView block, EventBlockView event
         }
         for (const auto& event : events.input)
             if (event.sample >= current && event.sample < current + amount && !midiScratch->push(event.sample, event.data)) return mute();
+        for (auto event : events.parameters)
+            if (event.offset >= processed && event.offset < processed + amount)
+            {
+                event.offset = filled + event.offset - processed;
+                if (!parameterScratch->push(event)) return mute();
+            }
         for (uint32_t channel = 0; channel < memory->config.inputs; ++channel)
             std::copy_n(block.inputs[channel] + processed, amount, inputScratch.data() + size_t(channel) * quantum + filled);
         uint32_t offset = filled;

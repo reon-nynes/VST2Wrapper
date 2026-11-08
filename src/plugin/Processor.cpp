@@ -13,10 +13,69 @@ juce::AudioProcessor::BusesProperties Processor::makeBuses()
 }
 Processor::Processor() : AudioProcessor(makeBuses())
 {
-    for (const auto& descriptor : moduleBinding().parameters) addParameter(new Parameter(descriptor));
+    for (const auto& descriptor : moduleBinding().parameters) addParameter(new Parameter(descriptor, client));
     setLatencySamples(static_cast<int>(moduleBinding().initialDelay));
+    startTimerHz(30);
 }
-Processor::~Processor() { client.stop(); }
+Processor::~Processor()
+{
+    stopTimer();
+    for (auto* parameter : getParameters()) static_cast<Parameter*>(parameter)->endSourceGesture();
+    client.stop();
+}
+void Processor::timerCallback()
+{
+    if (client.processId() == 0 || runtimeDiagnostic.isNotEmpty()) return;
+    if (!audioReady)
+    {
+        auto flushed = client.flushParameters();
+        if (auto* failure = std::get_if<Failure>(&flushed)) { runtimeDiagnostic = juce::String::fromUTF8(failure->message.c_str()); return; }
+    }
+    auto pending = client.takeNotifications();
+    if (auto* failure = std::get_if<Failure>(&pending))
+    {
+        runtimeDiagnostic = juce::String::fromUTF8(failure->message.c_str());
+        audioReady = false;
+        return;
+    }
+    bool refreshValues = false;
+    for (const auto& event : std::get<std::vector<HostNotification>>(pending))
+    {
+        if (event.index >= 0 && event.index < getParameters().size())
+        {
+            auto& parameter = *static_cast<Parameter*>(getParameters()[event.index]);
+            if (event.opcode == 43) parameter.beginSourceGesture();
+            if (event.opcode == 0) parameter.receiveSource(event.normalized);
+            if (event.opcode == 44) parameter.endSourceGesture();
+        }
+        if (event.opcode == 42)
+        {
+            refreshValues = true;
+            updateHostDisplay(ChangeDetails().withProgramChanged(true).withParameterInfoChanged(true).withNonParameterStateChanged(true));
+        }
+        if (event.opcode == 13)
+        {
+            setLatencySamples(static_cast<int>(client.latencySamples()));
+            tailDuration = std::max(0.0, static_cast<double>(event.normalized));
+        }
+    }
+    if (refreshValues)
+    {
+        auto values = client.parameterValues();
+        if (auto* current = std::get_if<std::vector<float>>(&values))
+            for (size_t i = 0; i < current->size() && i < static_cast<size_t>(getParameters().size()); ++i)
+                static_cast<Parameter*>(getParameters()[static_cast<int>(i)])->receiveSource((*current)[i]);
+    }
+    if (getParameters().isEmpty()) return;
+    for (int visited = 0; visited < getParameters().size(); ++visited)
+    {
+        auto* parameter = static_cast<Parameter*>(getParameters()[static_cast<int>(displayCursor++ % getParameters().size())]);
+        if (!parameter->needsDisplay()) continue;
+        auto display = client.parameterDisplay(parameter->descriptor.index);
+        if (auto* text = std::get_if<ParameterDisplay>(&display)) parameter->cacheDisplay(*text);
+        break;
+    }
+}
 void Processor::prepareToPlay(double rate, int maximumBlock)
 {
     audioReady = false;

@@ -5,6 +5,7 @@
 #include <windows.h>
 #include <memory>
 #include <functional>
+#include <atomic>
 
 namespace nytera
 {
@@ -16,6 +17,11 @@ public:
     Result<Manifest> inspect();
     Status prepare(const ProcessConfig&);
     void suspend();
+    Status applyParameter(const ParameterEvent&);
+    Result<std::string> parameterDisplay(uint32_t);
+    Status refreshLatency();
+    double tailSeconds();
+    void publishTransport(const TransportSnapshot&) noexcept;
     Status process(AudioBlockView, EventBlockView, const TransportSnapshot&);
     void resetEvents();
     void close() noexcept;
@@ -31,11 +37,17 @@ private:
     std::filesystem::path source;
     std::string sourceDirectory;
     ProcessConfig config;
+    bool readTransport(TransportSnapshot&) const noexcept;
+    std::atomic<double> callbackRate {44100};
+    std::atomic<uint32_t> callbackBlock {512};
+    std::atomic<uint32_t> transportSequence {0};
+    std::array<std::atomic<uint64_t>, 9> transportWords {};
     bool opened = false, prepared = false;
     std::unique_ptr<Vst2Events> events;
     std::vector<vst_event_midi_t> midiEvents;
     std::vector<vst_event_midi_sysex_t> sysexEvents;
     std::vector<double> doubleInputs, doubleOutputs;
+    std::vector<uint64_t> parameterSequences;
     std::vector<float> dryDelay;
     uint32_t dryPosition = 0, dryLatency = 0;
     bool flushNotes = false;
@@ -43,5 +55,6 @@ private:
     static thread_local const TransportSnapshot* processTransport;
     static thread_local EventBlockView* processEvents;
     static thread_local Vst2Instance* constructing;
+    static thread_local Vst2Instance* applyingParameter;
 };
 }

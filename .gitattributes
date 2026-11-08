@@ -2,4 +2,5 @@
 *.dll binary
 *.exe binary
 *.vst3 binary
-*.patch -text
+# Preserve dependency CRLF and unified-diff context prefixes.
+*.patch -text -whitespace

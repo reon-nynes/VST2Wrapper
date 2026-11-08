@@ -55,8 +55,15 @@ void Editor::attach()
 }
 void Editor::timerCallback()
 {
-    for (const auto& event : processor.bridge().takeNotifications())
-        if (event.opcode == 15 && event.index > 0 && event.value > 0)
-            applySize(static_cast<uint32_t>(event.index), static_cast<uint32_t>(event.value));
+    auto size = processor.bridge().editorSize();
+    auto* peer = getPeer();
+    auto scale = peer ? peer->getPlatformScaleFactor() : 1.0;
+    if (getWidth() != juce::roundToInt(size.width / scale) || getHeight() != juce::roundToInt(size.height / scale)) applySize(size.width, size.height);
+    if (failure.isEmpty() && processor.diagnostic().isNotEmpty())
+    {
+        failure = processor.diagnostic();
+        nativeView.setVisible(false);
+        repaint();
+    }
 }
 }

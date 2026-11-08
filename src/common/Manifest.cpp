@@ -126,7 +126,7 @@ Result<Manifest> decodeManifest(std::span<const std::byte> data)
         manifest.initialDelay = reader.number<uint32_t>();
         manifest.tailSeconds = reader.real64();
         if (manifest.editorSize.width > 32768 || manifest.editorSize.height > 32768
-            || !std::isfinite(manifest.tailSeconds) || manifest.tailSeconds < 0)
+            || std::isnan(manifest.tailSeconds) || manifest.tailSeconds < 0)
             throw std::runtime_error("Invalid editor or tail dimensions");
         auto payloadCount = reader.count(64000);
         for (uint32_t i = 0; i < payloadCount; ++i)

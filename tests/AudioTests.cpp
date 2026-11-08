@@ -156,7 +156,11 @@ TEST("Audio.CallbackAllocations")
     AudioSession session;
     allocationCount = 0;
     countAllocations = true;
-    for (int i = 0; i < 16; ++i) session.block(64);
+    for (int i = 0; i < 16; ++i)
+    {
+        session.client.enqueueParameter({0, 0, i % 2 ? 0.25f : 0.75f, 1});
+        session.block(64);
+    }
     countAllocations = false;
     CHECK(allocationCount == 0);
 }

@@ -5,7 +5,7 @@
 #include <mutex>
 namespace nytera
 {
-class Processor final : public juce::AudioProcessor
+class Processor final : public juce::AudioProcessor, private juce::Timer
 {
 public:
     Processor();
@@ -24,7 +24,7 @@ public:
     juce::AudioProcessorEditor* createEditor() override;
     bool acceptsMidi() const override { return moduleBinding().midiInput; }
     bool producesMidi() const override { return moduleBinding().midiOutput; }
-    double getTailLengthSeconds() const override { return moduleBinding().tailSeconds; }
+    double getTailLengthSeconds() const override { return tailDuration.load(); }
     int getNumPrograms() override { return 1; }
     int getCurrentProgram() override { return 0; }
     void setCurrentProgram(int) override {}
@@ -34,16 +34,21 @@ public:
     void setStateInformation(const void*, int) override {}
     Status ensureStarted();
     BridgeClient& bridge() { return client; }
+    const juce::String& diagnostic() const { return runtimeDiagnostic; }
 private:
     static BusesProperties makeBuses();
     template<class Sample> void processBuffer(juce::AudioBuffer<Sample>&, juce::MidiBuffer&, bool bypass = false);
     TransportSnapshot transportSnapshot() const;
+    void timerCallback() override;
     std::unique_ptr<struct ExtractedPayload> payload;
     BridgeClient client;
     std::mutex startupMutex;
     std::vector<MidiEvent> inputMidi;
     juce::MidiBuffer outputMidi;
     int64_t processingPosition = 0;
-    bool audioReady = false;
+    std::atomic<bool> audioReady {false};
+    juce::String runtimeDiagnostic;
+    size_t displayCursor = 0;
+    std::atomic<double> tailDuration {moduleBinding().tailSeconds};
 };
 }
