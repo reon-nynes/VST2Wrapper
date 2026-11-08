@@ -72,3 +72,24 @@ The project uses JUCE 8.0.13 and the pinned Xaymar VST2 SDK. The checked JUCE pa
 Dependency licenses are copied to `out/package/notices`. Consult those files for the applicable JUCE, Xaymar SDK and VST3 SDK terms. The supplied commercial demo DLLs remain local fixtures in ignored `vst2demo` and stay outside the staged application.
 
 Core code is organized under `src/common`, `src/bridge`, `src/helper`, `src/package`, `src/plugin` and `src/generator`. The approved design and implementation plan are under `docs/superpowers`.
+
+## Releases
+
+The Windows release workflow runs when a `v*` tag is pushed or a GitHub release is published. It builds the x64 generator and templates plus both helper architectures on Windows Server 2022, runs the native test suites, and attaches the Windows ZIP, matching source ZIP and SHA-256 checksums to the tagged release. A manual workflow run on a branch uploads build artifacts for verification.
+
+```powershell
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+The Windows ZIP contains the staged application and runtime assets. The source ZIP includes the tagged project, patched JUCE sources, the pinned VST2 SDK and dependency Git metadata for an offline dependency rebuild. Build it with the same `scripts/Build.ps1` command. Packaging can also run locally after committing the source and building Release.
+
+```powershell
+pwsh -File scripts/Package.ps1 -Version v0.1.0
+```
+
+## License
+
+Copyright (C) 2026 Nytera contributors. Nytera's original code is licensed under the GNU General Public License version 3 only, available in [LICENSE](LICENSE).
+
+JUCE 8.0.13 and the modifications in the JUCE patch use JUCE's AGPLv3 open-source terms. The full text is included in [LICENSES/AGPL-3.0-only.txt](LICENSES/AGPL-3.0-only.txt). GPLv3 section 13 permits combining GPLv3 and AGPLv3 code. Distribution of the combined application must satisfy the applicable AGPLv3 requirements as well. Third-party code retains its upstream license terms and release packages include the dependency notices. [JUCE license](https://github.com/juce-framework/JUCE/blob/8.0.13/LICENSE.md)

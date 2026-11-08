@@ -1,0 +1,66 @@
+name: Windows release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release-${{ github.event.release.tag_name || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build generator, x86 helper and x64 runtime
+        run: ./scripts/Build.ps1 -Configuration Release
+
+      - name: Run native test suites
+        run: ./scripts/Verify.ps1 -Configuration Release
+
+      - name: Package binaries and matching source
+        env:
+          RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:RELEASE_TAG } else { $env:GITHUB_SHA.Substring(0, 12) }
+          ./scripts/Package.ps1 -Version $version
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: NyteraVST2Wrapper-Windows-${{ github.run_number }}
+          path: out/release/*
+          if-no-files-found: error
+
+      - name: Publish tagged release assets
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name || github.ref_name }}
+        run: |
+          gh release view $env:RELEASE_TAG --repo $env:GH_REPO *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $env:RELEASE_TAG --repo $env:GH_REPO --verify-tag --title $env:RELEASE_TAG --generate-notes
+            if ($LASTEXITCODE -ne 0) { throw 'Release creation failed' }
+          }
+          $assets = @(Get-ChildItem -LiteralPath out/release -File | Select-Object -ExpandProperty FullName)
+          gh release upload $env:RELEASE_TAG @assets --repo $env:GH_REPO --clobber
+          if ($LASTEXITCODE -ne 0) { throw 'Release asset upload failed' }
