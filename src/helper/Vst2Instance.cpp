@@ -13,6 +13,27 @@ static void trace(const char* stage)
     char enabled[2] {};
     if (GetEnvironmentVariableA("NYTERA_TRACE", enabled, sizeof(enabled))) std::clog << stage << std::endl;
 }
+static std::string pluginDirectoryName(const std::filesystem::path& directory)
+{
+    try { return directory.string(); }
+    catch (const std::system_error&)
+    {
+        // Keep an ANSI-compatible directory for legacy plugins where possible.
+        auto required = GetShortPathNameW(directory.c_str(), nullptr, 0);
+        if (required)
+        {
+            std::wstring shortName(required, L'\0');
+            auto length = GetShortPathNameW(directory.c_str(), shortName.data(), required);
+            if (length && length < required)
+            {
+                shortName.resize(length);
+                try { return std::filesystem::path(shortName).string(); }
+                catch (const std::system_error&) { /* Short names may also require Unicode. */ }
+            }
+        }
+        return pathUtf8(directory);
+    }
+}
 thread_local Vst2Instance* Vst2Instance::constructing = nullptr;
 thread_local Vst2Instance* Vst2Instance::processing = nullptr;
 thread_local Vst2Instance* Vst2Instance::applyingParameter = nullptr;
@@ -29,7 +50,7 @@ Result<std::unique_ptr<Vst2Instance>> Vst2Instance::open(const std::filesystem::
     try
     {
         instance->source = std::filesystem::absolute(path);
-        instance->sourceDirectory = instance->source.parent_path().string();
+        instance->sourceDirectory = pluginDirectoryName(instance->source.parent_path());
         trace("Loading DLL");
         instance->module = LoadLibraryExW(instance->source.c_str(), nullptr, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
         if (!instance->module)
