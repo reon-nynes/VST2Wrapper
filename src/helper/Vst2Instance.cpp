@@ -236,6 +236,7 @@ Status Vst2Instance::process(AudioBlockView block, EventBlockView midi, const Tr
         || effect->num_params != static_cast<int32_t>(parameterSequences.size()))
         return Failure{ErrorCode::plugin, "Source topology or processing bounds changed"};
     processing = this; processTransport = &transport; processEvents = &midi;
+    processingSamples = block.samples; invalidOutputEvents = false;
     publishTransport(transport);
     try
     {
@@ -319,6 +320,7 @@ Status Vst2Instance::process(AudioBlockView block, EventBlockView midi, const Tr
             }
             if (dryLatency) dryPosition = (dryPosition + 1) % dryLatency;
         }
+        if (invalidOutputEvents) throw std::runtime_error("Source emitted invalid MIDI events");
         processing = nullptr; processTransport = nullptr; processEvents = nullptr;
         return std::monostate{};
     }
@@ -384,11 +386,12 @@ intptr_t Vst2Instance::hostCall(int32_t opcode, int32_t index, intptr_t value, v
         {
             if (processing != this || !processEvents || !processEvents->emit || !pointer) return 0;
             auto& list = *static_cast<Vst2Events*>(pointer);
-            if (list.count < 0 || list.count > 4096) return 0;
+            auto reject = [&]() -> intptr_t { invalidOutputEvents = true; return 0; };
+            if (list.count < 0 || list.count > 4128) return reject();
             for (int32_t i = 0; i < list.count; ++i)
             {
                 auto* event = list.events[i];
-                if (!event || event->offset < 0 || event->offset >= static_cast<int32_t>(config.maximumBlock)) return 0;
+                if (!event || event->offset < 0 || event->offset >= static_cast<int32_t>(processingSamples)) return reject();
                 std::span<const std::byte> bytes;
                 if (event->type == VST_EVENT_TYPE_MIDI)
                 {
@@ -402,7 +405,7 @@ intptr_t Vst2Instance::hostCall(int32_t opcode, int32_t index, intptr_t value, v
                 else if (event->type == VST_EVENT_TYPE_MIDI_SYSEX)
                 {
                     auto* message = reinterpret_cast<vst_event_midi_sysex_t*>(event);
-                    if (message->sysex.size < 0 || message->sysex.size > 1024 * 1024 || !message->sysex.data) return 0;
+                    if (message->sysex.size <= 0 || message->sysex.size > 1024 * 1024 || !message->sysex.data) return reject();
                     bytes = {reinterpret_cast<const std::byte*>(message->sysex.data), static_cast<size_t>(message->sysex.size)};
                 }
                 if (!bytes.empty()) processEvents->emit(processEvents->context, processTransport->streamSamples + event->offset, bytes);

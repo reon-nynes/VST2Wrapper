@@ -9,6 +9,8 @@
 
 namespace nytera
 {
+enum class BridgePhase { stopped, starting, ready, failed };
+struct BridgeStatus { BridgePhase phase = BridgePhase::stopped; std::string diagnostic; };
 class BridgeClient
 {
 public:
@@ -19,6 +21,8 @@ public:
     Status start(const Manifest&, const std::filesystem::path& helper, const std::filesystem::path& source);
     Result<Bytes> request(ControlCommand, std::span<const std::byte> = {}, std::chrono::milliseconds timeout = std::chrono::seconds(10));
     void stop() noexcept;
+    BridgeStatus status() const noexcept;
+    Status retry();
     Result<std::vector<HostNotification>> takeNotifications();
     uint32_t processId() const noexcept;
     std::string endpoint() const;

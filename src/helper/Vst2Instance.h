@@ -61,6 +61,8 @@ private:
     uint32_t dryPosition = 0, dryLatency = 0;
     bool flushNotes = false;
     bool hasProcessed = false;
+    bool invalidOutputEvents = false;
+    uint32_t processingSamples = 0;
     static thread_local Vst2Instance* processing;
     static thread_local const TransportSnapshot* processTransport;
     static thread_local EventBlockView* processEvents;

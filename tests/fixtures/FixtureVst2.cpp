@@ -32,6 +32,8 @@ struct Instance
     std::array<std::byte, 32> stateBlob;
     bool stallCapture = false;
     bool slowCapture = false;
+    bool crashCapture = false;
+    bool stallEditor = false;
     vst_rect_t rectangle {0, 0, 160, 320};
     HWND editor = nullptr;
     struct Note { int32_t offset; uint8_t status, data1, data2; };
@@ -104,6 +106,21 @@ static LRESULT CALLBACK editorProcedure(HWND window, UINT message, WPARAM wParam
         instance->slowCapture = true;
         return 0;
     }
+    if (instance && message == WM_COMMAND && LOWORD(wParam) == 109)
+    {
+        instance->crashCapture = true;
+        return 0;
+    }
+    if (instance && message == WM_COMMAND && LOWORD(wParam) == 110)
+    {
+        instance->stallEditor = true;
+        return 0;
+    }
+    if (instance && message == WM_COMMAND && LOWORD(wParam) == 112)
+    {
+        instance->flags |= 64;
+        return 0;
+    }
     if (instance && message == WM_PAINT)
     {
         PAINTSTRUCT paint;
@@ -152,6 +169,7 @@ static intptr_t __cdecl control(vst_effect_t* effect, int32_t opcode, int32_t in
         {
             if (!(instance.flags & 8)) return 0;
             if (instance.stallCapture) Sleep(INFINITE);
+            if (instance.crashCapture) TerminateProcess(GetCurrentProcess(), 33);
             if (instance.slowCapture) Sleep(100);
             if (index == 0 && (instance.flags & 16384)) return 0;
             instance.stateBlob.fill(std::byte{0xa5});
@@ -187,6 +205,7 @@ static intptr_t __cdecl control(vst_effect_t* effect, int32_t opcode, int32_t in
         case VST_EFFECT_OPCODE_CATEGORY: return (instance.flags & 2) ? VST_EFFECT_CATEGORY_CONTAINER : 1;
         case VST_EFFECT_OPCODE_EDITOR_GET_RECT: *static_cast<vst_rect_t**>(pointer) = &instance.rectangle; return 1;
         case VST_EFFECT_OPCODE_EDITOR_OPEN:
+            if (instance.stallEditor) Sleep(INFINITE);
         {
             WNDCLASSW type {};
             type.lpfnWndProc = editorProcedure;
@@ -234,6 +253,14 @@ static void __cdecl process(vst_effect_t* effect, const float* const* inputs, fl
     auto& instance = *static_cast<Instance*>(effect->effect_internal);
     if (instance.flags & 32) RaiseException(0xc0000005, 0, 0, nullptr);
     if (instance.flags & 64) Sleep(INFINITE);
+    if (instance.flags & 65536)
+    {
+        vst_event_midi_t message {};
+        message.event.type = VST_EVENT_TYPE_MIDI; message.event.size = sizeof(message);
+        message.event.offset = count + 1; message.midi.data[0] = static_cast<char>(0x90);
+        CanonicalEvents outgoing {}; outgoing.count = 1; outgoing.events[0] = &message.event;
+        instance.host(effect, 9, 0, 0, &outgoing, 0);
+    }
     auto* time = (instance.flags & 1024) ? reinterpret_cast<CanonicalTime*>(instance.host(effect, 7, 0, 0xffff, nullptr, 0)) : nullptr;
     uint32_t noteIndex = 0;
     for (int32_t i = 0; i < count; ++i)
@@ -275,6 +302,7 @@ static float __cdecl getParameter(vst_effect_t* effect, uint32_t)
 }
 extern "C" __declspec(dllexport) vst_effect_t* VSTPluginMain(CanonicalHost host)
 {
+    if (options & 262144) Sleep(INFINITE);
     char vendor[64] {};
     auto version = host(nullptr, 1, 0, 0, nullptr, 0);
     auto vendorResult = host(nullptr, 32, 0, 0, vendor, 0);

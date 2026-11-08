@@ -29,6 +29,14 @@ void Processor::timerCallback()
 {
     std::unique_lock lock(lifecycleMutex, std::try_to_lock);
     if (!lock.owns_lock()) return;
+    auto status = client.status();
+    if (status.phase == BridgePhase::failed)
+    {
+        runtimeDiagnostic = juce::String::fromUTF8(status.diagnostic.c_str());
+        if (audioReady.exchange(false)) pendingNotesOff = true;
+        for (auto* parameter : getParameters()) static_cast<Parameter*>(parameter)->endSourceGesture();
+        return;
+    }
     if (client.processId() == 0 || runtimeDiagnostic.isNotEmpty()) return;
     if (!audioReady)
     {
@@ -89,10 +97,11 @@ void Processor::prepareToPlay(double rate, int maximumBlock)
     processingPosition = 0;
     inputMidi.reserve(4096);
     outputMidi.ensureSize(2 * (1024 * 1024 + 4096 * 8));
+    lastConfig = ProcessConfig{rate, static_cast<uint32_t>(std::max(1, maximumBlock)),
+        static_cast<uint32_t>(moduleBinding().inputs.size()), static_cast<uint32_t>(moduleBinding().outputs.size()), isNonRealtime()};
     auto started = startSource();
     if (auto* failure = std::get_if<Failure>(&started)) { runtimeDiagnostic = juce::String::fromUTF8(failure->message.c_str()); return; }
-    auto prepared = client.prepare({rate, static_cast<uint32_t>(std::max(1, maximumBlock)),
-        static_cast<uint32_t>(moduleBinding().inputs.size()), static_cast<uint32_t>(moduleBinding().outputs.size()), isNonRealtime()});
+    auto prepared = client.prepare(*lastConfig);
     audioReady = std::holds_alternative<std::monostate>(prepared);
     if (audioReady) { setLatencySamples(static_cast<int>(client.latencySamples())); tailDuration = client.tailLengthSeconds(); }
     else runtimeDiagnostic = juce::String::fromUTF8(std::get<Failure>(prepared).message.c_str());
@@ -101,6 +110,7 @@ void Processor::releaseResources()
 {
     std::lock_guard lock(lifecycleMutex);
     audioReady = false;
+    lastConfig.reset();
     if (client.processId()) client.releaseAudio();
 }
 TransportSnapshot Processor::transportSnapshot() const
@@ -132,7 +142,13 @@ TransportSnapshot Processor::transportSnapshot() const
 template<class Sample> void Processor::processBuffer(juce::AudioBuffer<Sample>& buffer, juce::MidiBuffer& midi, bool bypass)
 {
     juce::ScopedNoDenormals noDenormals;
-    if (!audioReady) { buffer.clear(); midi.clear(); return; }
+    if (!audioReady)
+    {
+        buffer.clear(); midi.clear();
+        if (pendingNotesOff.exchange(false) && producesMidi())
+            for (int channel = 1; channel <= 16; ++channel) midi.addEvent(juce::MidiMessage::allNotesOff(channel), 0);
+        return;
+    }
     inputMidi.clear();
     for (const auto message : midi)
     {
@@ -183,6 +199,8 @@ Status Processor::ensureStarted()
 }
 Status Processor::startSource()
 {
+    auto status = client.status();
+    if (status.phase == BridgePhase::failed) return Failure{ErrorCode::plugin, status.diagnostic};
     if (client.processId() != 0) return std::monostate{};
     if (!payload)
     {
@@ -201,6 +219,35 @@ Status Processor::startSource()
     for (size_t index = 0; index < current.size(); ++index) static_cast<Parameter*>(getParameters()[static_cast<int>(index)])->receiveSource(current[index]);
     auto programs = client.programInfo();
     if (auto* info = std::get_if<ProgramInfo>(&programs)) syncPrograms(*info, true);
+    return std::monostate{};
+}
+Status Processor::retrySource()
+{
+    std::lock_guard lock(lifecycleMutex);
+    audioReady = false;
+    if (payload)
+    {
+        auto checked = ensurePayload(currentModule(), moduleBinding(), defaultCacheRoot());
+        if (auto* failure = std::get_if<Failure>(&checked)) return *failure;
+        payload = std::make_unique<ExtractedPayload>(std::get<ExtractedPayload>(std::move(checked)));
+    }
+    auto retried = payload ? client.retry() : startSource();
+    if (auto* failure = std::get_if<Failure>(&retried)) { runtimeDiagnostic = juce::String::fromUTF8(failure->message.c_str()); return *failure; }
+    if (auto restored = client.lastState())
+    {
+        for (size_t index = 0; index < restored->parameters.size(); ++index)
+            static_cast<Parameter*>(getParameters()[static_cast<int>(index)])->receiveSource(restored->parameters[index]);
+        currentProgram = static_cast<int>(restored->program);
+        updateHostDisplay(ChangeDetails().withProgramChanged(true).withParameterInfoChanged(true));
+    }
+    if (lastConfig)
+    {
+        auto prepared = client.prepare(*lastConfig);
+        if (auto* failure = std::get_if<Failure>(&prepared)) { runtimeDiagnostic = juce::String::fromUTF8(failure->message.c_str()); return *failure; }
+        audioReady = true;
+        setLatencySamples(static_cast<int>(client.latencySamples())); tailDuration = client.tailLengthSeconds();
+    }
+    runtimeDiagnostic.clear();
     return std::monostate{};
 }
 juce::String Processor::diagnostic() const
@@ -247,7 +294,7 @@ void Processor::getStateInformation(juce::MemoryBlock& destination)
 {
     std::lock_guard lock(lifecycleMutex);
     auto saved = client.lastState();
-    if (!saved || client.processId())
+    if (client.status().phase != BridgePhase::failed && (!saved || client.processId()))
     {
         auto started = startSource();
         if (auto* failure = std::get_if<Failure>(&started)) runtimeDiagnostic = juce::String::fromUTF8(failure->message.c_str());

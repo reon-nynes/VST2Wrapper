@@ -6,8 +6,22 @@ namespace nytera
 Editor::Editor(Processor& owner) : AudioProcessorEditor(owner), processor(owner)
 {
     addAndMakeVisible(nativeView);
+    addChildComponent(retry);
+    retry.onClick = [this]
+    {
+        retry.setEnabled(false);
+        auto result = processor.retrySource();
+        if (auto* error = std::get_if<Failure>(&result)) failure = juce::String::fromUTF8(error->message.c_str());
+        else
+        {
+            failure.clear(); nativeView.setVisible(true);
+            if (!attached) attach();
+        }
+        retry.setEnabled(true); retry.setVisible(failure.isNotEmpty()); repaint();
+    };
     setSize(static_cast<int>(moduleBinding().editorSize.width), static_cast<int>(moduleBinding().editorSize.height));
     setWantsKeyboardFocus(true);
+    startTimerHz(30);
 }
 Editor::~Editor()
 {
@@ -20,9 +34,9 @@ void Editor::paint(juce::Graphics& graphics)
     if (failure.isEmpty()) return;
     graphics.fillAll(juce::Colour(0xff202124));
     graphics.setColour(juce::Colours::white);
-    graphics.drawFittedText(failure, getLocalBounds().reduced(20), juce::Justification::centred, 8);
+    graphics.drawFittedText(failure, getLocalBounds().reduced(20).withTrimmedBottom(45), juce::Justification::centred, 8);
 }
-void Editor::resized() { nativeView.setBounds(getLocalBounds()); }
+void Editor::resized() { nativeView.setBounds(getLocalBounds()); retry.setBounds(getWidth() / 2 - 85, getHeight() - 45, 170, 28); }
 void Editor::parentHierarchyChanged() { attach(); }
 void Editor::visibilityChanged() { if (isShowing()) attach(); }
 void Editor::applySize(uint32_t width, uint32_t height)
@@ -66,5 +80,6 @@ void Editor::timerCallback()
         nativeView.setVisible(false);
         repaint();
     }
+    retry.setVisible(failure.isNotEmpty());
 }
 }

@@ -251,7 +251,10 @@ int AudioTransport::findOutput(uint64_t sequence, bool offline) noexcept
         if (InterlockedCompareExchange(&memory->header().error, 0, 0)) return -2;
         if (!offline) return -1;
         auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
-        if (remaining <= 0 || WaitForSingleObject(memory->doneEvent(), static_cast<DWORD>(remaining)) != WAIT_OBJECT_0) return -2;
+        if (remaining <= 0) return -2;
+        HANDLE events[] {memory->doneEvent(), stopEvent};
+        auto result = WaitForMultipleObjects(stopEvent ? 2 : 1, events, FALSE, static_cast<DWORD>(remaining));
+        if (result != WAIT_OBJECT_0) return -2;
     }
 }
 ProcessResult AudioTransport::process(AudioBlockView block, EventBlockView events, const TransportSnapshot& transport) noexcept

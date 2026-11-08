@@ -2,6 +2,7 @@
 #include "Control.h"
 #include "AudioTransport.h"
 #include "common/Codec.h"
+#include "common/Deadline.h"
 #include "common/BoundedQueue.h"
 #include <bcrypt.h>
 #include <mutex>
@@ -11,9 +12,34 @@ namespace nytera
 {
 struct BridgeClient::Impl
 {
-    std::timed_mutex mutex;
-    std::unique_ptr<Control> control;
-    Handle process, job;
+    struct Session
+    {
+        std::timed_mutex mutex;
+        std::unique_ptr<Control> control;
+        Handle process, job;
+        uint32_t sequence = 0;
+    };
+    std::atomic<std::shared_ptr<Session>> session;
+    std::recursive_mutex lifecycle;
+    std::atomic<uint64_t> stopEpoch {0};
+    std::atomic<BridgePhase> phase {BridgePhase::stopped};
+    std::mutex diagnosticMutex;
+    std::string diagnostic;
+    std::atomic<bool> renderFailed {false}, notesOff {false};
+    uint32_t consecutiveUnderruns = 0;
+    std::filesystem::path helperPath, sourcePath;
+    std::optional<ProcessConfig> preparedConfig;
+    uint64_t editorParent = 0;
+    float editorScale = 1;
+    void fail(const Failure& failure, const std::shared_ptr<Session>& current)
+    {
+        if (session.load() != current || !current) return;
+        ready = false;
+        notesOff = true;
+        phase = BridgePhase::failed;
+        { std::lock_guard lock(diagnosticMutex); diagnostic = failure.message; }
+        current->control->cancel();
+    }
     std::atomic<uint32_t> pid {0};
     std::atomic<uint32_t> editorWidth {480}, editorHeight {320};
     std::atomic<uint32_t> totalLatency {0};
@@ -21,6 +47,7 @@ struct BridgeClient::Impl
     std::atomic<double> tail {0};
     std::atomic<bool> ready {false}, maintenance {false};
     std::atomic<uint32_t> activeCallbacks {0};
+    Handle stopEvent {CreateEventW(nullptr, TRUE, TRUE, nullptr)};
     std::atomic<uint64_t> skippedSamples {0};
     std::timed_mutex stateOperations;
     std::mutex snapshots;
@@ -50,6 +77,16 @@ struct BridgeClient::Impl
             for (auto* output : block.outputs) if (output) std::fill_n(output, block.samples, 0);
             return result;
         };
+        if (!ready.load())
+        {
+            if (notesOff.exchange(false) && events.emit)
+                for (uint8_t channel = 0; channel < 16; ++channel)
+                {
+                    std::array<std::byte, 3> off {static_cast<std::byte>(0xb0 | channel), std::byte{123}, std::byte{0}};
+                    events.emit(events.context, transport.streamSamples, off);
+                }
+            return silence(ProcessResult::failed);
+        }
         if (maintenance.load()) { skippedSamples.fetch_add(block.samples); return silence(ProcessResult::priming); }
         activeCallbacks.fetch_add(1);
         struct Finish { std::atomic<uint32_t>& count; ~Finish() { count.fetch_sub(1); } } finish {activeCallbacks};
@@ -58,7 +95,11 @@ struct BridgeClient::Impl
         auto skipped = skippedSamples.exchange(0);
         if (skipped) audio->skipSamples(skipped);
         collectParameters(events);
-        return audio->process(block, events, transport);
+        auto result = audio->process(block, events, transport);
+        if (result == ProcessResult::underrun) ++consecutiveUnderruns;
+        else consecutiveUnderruns = 0;
+        if (result == ProcessResult::failed || consecutiveUnderruns >= 8) renderFailed = true;
+        return result;
     }
     std::unique_ptr<AudioTransport> audio;
     uint32_t audioGeneration = 0;
@@ -82,17 +123,17 @@ struct BridgeClient::Impl
         if (parameterOverflow.load() && audio) InterlockedExchange(&audio->shared().header().error, 1);
     }
     std::string pipeName;
-    uint32_t sequence = 0;
-    Result<Bytes> exchange(ControlCommand command, std::span<const std::byte> payload, std::chrono::milliseconds timeout)
+    Result<Bytes> exchange(const std::shared_ptr<Session>& current, ControlCommand command, std::span<const std::byte> payload, std::chrono::milliseconds timeout)
     {
-        if (!control) return Failure{ErrorCode::disconnected, "Helper is unavailable"};
-        Frame frame {command, ++sequence, false, Bytes(payload.begin(), payload.end())};
-        auto sent = control->send(frame, timeout);
+        if (!current) return Failure{ErrorCode::disconnected, "Helper is unavailable"};
+        Deadline deadline(timeout);
+        Frame frame {command, ++current->sequence, false, Bytes(payload.begin(), payload.end())};
+        auto sent = current->control->send(frame, deadline.remaining());
         if (auto* failure = std::get_if<Failure>(&sent)) return *failure;
-        auto response = control->receive(timeout);
+        auto response = current->control->receive(deadline.remaining());
         if (auto* failure = std::get_if<Failure>(&response)) return *failure;
         auto reply = std::get<Frame>(std::move(response));
-        if (reply.command != command || reply.requestId != sequence) return Failure{ErrorCode::invalidData, "Bridge response ordering mismatch"};
+        if (reply.command != command || reply.requestId != current->sequence) return Failure{ErrorCode::invalidData, "Bridge response ordering mismatch"};
         if (reply.failed)
         {
             Reader reader(reply.payload);
@@ -104,8 +145,43 @@ struct BridgeClient::Impl
 };
 BridgeClient::BridgeClient() : impl(std::make_unique<Impl>()) { impl->parameterScratch.reserve(8192); }
 BridgeClient::~BridgeClient() { stop(); }
+BridgeStatus BridgeClient::status() const noexcept
+{
+    try
+    {
+        auto current = impl->session.load();
+        if (current && impl->phase == BridgePhase::ready)
+        {
+            if (WaitForSingleObject(current->process.get(), 0) == WAIT_OBJECT_0)
+                impl->fail({ErrorCode::disconnected, "Source helper exited. Retry to restore the saved instance."}, current);
+            else if (impl->renderFailed.exchange(false))
+                impl->fail({ErrorCode::plugin, "Source processing failed or repeatedly missed its deadline. Retry the instance."}, current);
+        }
+        std::lock_guard lock(impl->diagnosticMutex);
+        return {impl->phase.load(), impl->diagnostic};
+    }
+    catch (...) { return {BridgePhase::failed, {}}; }
+}
+Status BridgeClient::retry()
+{
+    std::lock_guard lifecycle(impl->lifecycle);
+    std::optional<Manifest> binding;
+    { std::lock_guard lock(impl->snapshots); binding = impl->binding; }
+    if (!binding) return Failure{ErrorCode::identity, "This instance has no bound source"};
+    auto saved = lastState();
+    auto config = impl->preparedConfig;
+    auto parent = impl->editorParent; auto scale = impl->editorScale;
+    stop();
+    if (saved) { auto restored = restoreState(*saved); if (auto* failure = std::get_if<Failure>(&restored)) return *failure; }
+    auto started = start(*binding, impl->helperPath, impl->sourcePath);
+    if (auto* failure = std::get_if<Failure>(&started)) return *failure;
+    if (config) { auto prepared = prepare(*config); if (auto* failure = std::get_if<Failure>(&prepared)) return *failure; }
+    if (parent && IsWindow(reinterpret_cast<HWND>(parent))) return openEditor(parent, scale);
+    return std::monostate{};
+}
 Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path& helper, const std::filesystem::path& source)
 {
+    std::lock_guard lifecycle(impl->lifecycle);
     {
         std::lock_guard snapshotLock(impl->snapshots);
         if (impl->binding && (impl->binding->conversionId != manifest.conversionId || impl->binding->sourceHash != manifest.sourceHash))
@@ -118,10 +194,23 @@ Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path
         impl->binding = manifest;
     }
     stop();
-    std::unique_lock stateOperation(impl->stateOperations);
-    std::unique_lock lock(impl->mutex);
+    auto epoch = impl->stopEpoch.load();
+    Deadline deadline(std::chrono::seconds(60));
+    std::unique_lock stateOperation(impl->stateOperations, std::defer_lock);
+    if (!stateOperation.try_lock_for(deadline.remaining())) return Failure{ErrorCode::timeout, "Previous source operation did not stop"};
+    auto current = std::make_shared<Impl::Session>();
+    std::unique_lock lock(current->mutex);
+    impl->phase = BridgePhase::starting;
+    impl->helperPath = helper; impl->sourcePath = source;
+    impl->renderFailed = false; impl->parameterOverflow = false;
+    impl->consecutiveUnderruns = 0;
+    { std::lock_guard diagnosticLock(impl->diagnosticMutex); impl->diagnostic.clear(); }
     try
     {
+        if (!impl->stopEvent.valid()) throw std::runtime_error("Cannot create source cancellation event");
+        if (!impl->pause(deadline.remaining())) throw std::runtime_error("Previous audio callback did not stop");
+        impl->maintenance = false;
+        ResetEvent(impl->stopEvent.get());
         impl->totalLatency = manifest.initialDelay;
         impl->pipelineLatency = 0;
         impl->tail = manifest.tailSeconds;
@@ -132,12 +221,12 @@ Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path
         auto token = hex(random);
         impl->pipeName = "\\\\.\\pipe\\Nytera-" + token;
         auto server = Control::server(utf8Path(impl->pipeName).wstring());
-        if (auto* failure = std::get_if<Failure>(&server)) return *failure;
-        impl->control = std::make_unique<Control>(std::get<Control>(std::move(server)));
-        impl->job.reset(CreateJobObjectW(nullptr, nullptr));
+        if (auto* failure = std::get_if<Failure>(&server)) throw std::runtime_error(failure->message);
+        current->control = std::make_unique<Control>(std::get<Control>(std::move(server)));
+        current->job.reset(CreateJobObjectW(nullptr, nullptr));
         JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits {};
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        if (!impl->job.valid() || !SetInformationJobObject(impl->job.get(), JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
+        if (!current->job.valid() || !SetInformationJobObject(current->job.get(), JobObjectExtendedLimitInformation, &limits, sizeof(limits)))
             throw std::runtime_error("Cannot create helper job");
         std::wstring command = quoteArgument(std::filesystem::absolute(helper).wstring()) + L" --serve "
             + quoteArgument(utf8Path(impl->pipeName).wstring()) + L" " + utf8Path(token).wstring();
@@ -146,16 +235,18 @@ Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path
         if (!CreateProcessW(std::filesystem::absolute(helper).c_str(), command.data(), nullptr, nullptr, FALSE,
             CREATE_NO_WINDOW | CREATE_SUSPENDED, nullptr, nullptr, &startup, &information))
             throw std::runtime_error("Cannot launch helper " + std::to_string(GetLastError()));
-        impl->process.reset(information.hProcess);
+        current->process.reset(information.hProcess);
         Handle thread(information.hThread);
         impl->pid = information.dwProcessId;
-        if (!AssignProcessToJobObject(impl->job.get(), impl->process.get()))
+        if (!AssignProcessToJobObject(current->job.get(), current->process.get()))
         {
-            TerminateProcess(impl->process.get(), 1);
+            TerminateProcess(current->process.get(), 1);
             throw std::runtime_error("Cannot attach helper job");
         }
+        impl->session = current;
+        if (epoch != impl->stopEpoch.load()) throw std::runtime_error("Helper startup cancelled");
         ResumeThread(thread.get());
-        auto connected = impl->control->accept(std::chrono::seconds(60));
+        auto connected = current->control->accept(deadline.remaining());
         if (auto* failure = std::get_if<Failure>(&connected)) throw std::runtime_error(failure->message);
         Writer handshake;
         handshake.text(token);
@@ -163,7 +254,7 @@ Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path
         auto binding = encodeManifest(manifest);
         handshake.number(static_cast<uint32_t>(binding.size()));
         handshake.raw(binding);
-        auto response = impl->exchange(ControlCommand::hello, handshake.bytes, std::chrono::seconds(60));
+        auto response = impl->exchange(current, ControlCommand::hello, handshake.bytes, deadline.remaining());
         if (auto* failure = std::get_if<Failure>(&response)) throw std::runtime_error(failure->message);
         lock.unlock();
         for (int attempt = 0; attempt < 8; ++attempt)
@@ -173,9 +264,13 @@ Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path
             {
                 std::lock_guard snapshotLock(impl->snapshots);
                 pending = impl->pendingState; barrier = impl->pendingBarrier;
-                if (!pending) { impl->ready = true; return std::monostate{}; }
+                if (!pending)
+                {
+                    if (impl->session.load() != current) throw std::runtime_error("Helper startup cancelled");
+                    impl->ready = true; impl->phase = BridgePhase::ready; return std::monostate{};
+                }
             }
-            auto restored = applyState(*pending, barrier, std::chrono::seconds(10));
+            auto restored = applyState(*pending, barrier, deadline.remaining());
             if (auto* failure = std::get_if<Failure>(&restored)) throw std::runtime_error(failure->message);
             {
                 std::lock_guard snapshotLock(impl->snapshots);
@@ -186,40 +281,59 @@ Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path
     }
     catch (const std::exception& error)
     {
-        if (!lock.owns_lock()) lock.lock();
-        impl->ready = false;
-        impl->control.reset();
-        impl->job.reset();
-        if (impl->process.valid()) WaitForSingleObject(impl->process.get(), 2000);
-        impl->process.reset();
+        Failure failure {ErrorCode::plugin, error.what()};
+        impl->fail(failure, current);
+        if (epoch == impl->stopEpoch.load())
+        {
+            impl->phase = BridgePhase::failed;
+            std::lock_guard diagnosticLock(impl->diagnosticMutex); impl->diagnostic = failure.message;
+        }
+        if (current->job.valid()) TerminateJobObject(current->job.get(), 1);
         impl->pid = 0;
-        return Failure{ErrorCode::plugin, error.what()};
+        return failure;
     }
 }
 Result<Bytes> BridgeClient::request(ControlCommand command, std::span<const std::byte> payload, std::chrono::milliseconds timeout)
 {
-    std::unique_lock lock(impl->mutex, std::defer_lock);
-    if (!lock.try_lock_for(timeout)) return Failure{ErrorCode::timeout, "Helper control channel is busy"};
-    try { return impl->exchange(command, payload, timeout); }
-    catch (const std::exception& error) { return Failure{ErrorCode::invalidData, error.what()}; }
+    Deadline deadline(timeout);
+    auto current = impl->session.load();
+    if (!current) return Failure{ErrorCode::disconnected, "Helper is unavailable"};
+    std::unique_lock lock(current->mutex, std::defer_lock);
+    if (!lock.try_lock_for(deadline.remaining())) return Failure{ErrorCode::timeout, "Helper control channel is busy"};
+    try
+    {
+        auto result = impl->exchange(current, command, payload, deadline.remaining());
+        if (auto* failure = std::get_if<Failure>(&result)) impl->fail(*failure, current);
+        return result;
+    }
+    catch (const std::exception& error)
+    {
+        Failure failure {ErrorCode::invalidData, error.what()};
+        impl->fail(failure, current); return failure;
+    }
 }
 void BridgeClient::stop() noexcept
 {
+    ++impl->stopEpoch;
     impl->ready = false;
+    if (impl->stopEvent.valid()) SetEvent(impl->stopEvent.get());
+    impl->notesOff = true;
+    impl->phase = BridgePhase::stopped;
+    impl->pid = 0;
     try
     {
-        std::unique_lock lock(impl->mutex);
-        if (impl->audio) InterlockedExchange(&impl->audio->shared().header().error, 1);
-        if (impl->control) impl->exchange(ControlCommand::shutdown, {}, std::chrono::seconds(2));
-        impl->control.reset();
-        if (impl->process.valid() && WaitForSingleObject(impl->process.get(), 2000) != WAIT_OBJECT_0)
-            TerminateProcess(impl->process.get(), 1);
-        impl->job.reset();
-        impl->process.reset();
-        impl->pid = 0;
+        auto current = impl->session.exchange(nullptr);
+        if (!current) return;
+        std::unique_lock lock(current->mutex, std::defer_lock);
+        if (lock.try_lock_for(std::chrono::milliseconds(5)))
+            impl->exchange(current, ControlCommand::shutdown, {}, std::chrono::milliseconds(100));
+        current->control->cancel();
+        if (current->job.valid()) TerminateJobObject(current->job.get(), 0);
+        if (current->process.valid()) WaitForSingleObject(current->process.get(), 300);
     }
     catch (...) {}
 }
+
 Result<std::vector<HostNotification>> BridgeClient::takeNotifications()
 {
     try
@@ -247,6 +361,8 @@ uint32_t BridgeClient::processId() const noexcept { return impl->pid.load(); }
 std::string BridgeClient::endpoint() const { return impl->pipeName; }
 Status BridgeClient::openEditor(uint64_t parentWindow, float scale)
 {
+    std::lock_guard lifecycle(impl->lifecycle);
+    impl->editorParent = parentWindow; impl->editorScale = scale;
     Writer writer;
     writer.number(parentWindow); writer.floating(scale);
     auto reply = request(ControlCommand::openEditor, writer.bytes);
@@ -263,11 +379,21 @@ Status BridgeClient::openEditor(uint64_t parentWindow, float scale)
 }
 void BridgeClient::closeEditor() noexcept
 {
-    try { request(ControlCommand::closeEditor, {}, std::chrono::seconds(2)); } catch (...) {}
+    try
+    {
+        std::lock_guard lifecycle(impl->lifecycle);
+        impl->editorParent = 0;
+        if (impl->ready) request(ControlCommand::closeEditor, {}, std::chrono::seconds(2));
+    }
+    catch (...) {}
 }
 Size BridgeClient::editorSize() const noexcept { return {impl->editorWidth.load(), impl->editorHeight.load()}; }
 Status BridgeClient::prepare(const ProcessConfig& requested)
 {
+    std::lock_guard lifecycle(impl->lifecycle);
+    std::unique_lock operation(impl->stateOperations);
+    Impl::Resume resume {*impl};
+    if (!impl->pause(std::chrono::seconds(10))) return Failure{ErrorCode::timeout, "Audio did not reach a preparation boundary"};
     auto config = requested;
     config.parameterCount = impl->parameterCount;
     { std::lock_guard lock(impl->snapshots); if (impl->binding) config.programCount = static_cast<uint32_t>(impl->binding->programs.names.size()); }
@@ -279,6 +405,7 @@ Status BridgeClient::prepare(const ProcessConfig& requested)
     auto created = AudioTransport::create(name, config);
     if (auto* failure = std::get_if<Failure>(&created)) return *failure;
     auto audio = std::get<std::unique_ptr<AudioTransport>>(std::move(created));
+    audio->setStopEvent(impl->stopEvent.get());
     Writer writer;
     writer.text(pathUtf8(name)); writer.floating(config.sampleRate);
     writer.number(config.maximumBlock); writer.number(config.inputs); writer.number(config.outputs); writer.boolean(config.offline);
@@ -294,6 +421,7 @@ Status BridgeClient::prepare(const ProcessConfig& requested)
         impl->pipelineLatency = audio->latency();
         impl->tail = tail;
         impl->audio = std::move(audio);
+        impl->preparedConfig = requested;
         {
             std::lock_guard lock(impl->snapshots);
             if (impl->completeState) impl->audio->restoreCheckpoint(impl->completeState->program, impl->completeState->parameters, impl->completeBarrier);
@@ -362,6 +490,11 @@ Status BridgeClient::flushParameters()
 }
 Status BridgeClient::releaseAudio()
 {
+    std::lock_guard lifecycle(impl->lifecycle);
+    std::unique_lock operation(impl->stateOperations);
+    Impl::Resume resume {*impl};
+    if (!impl->pause(std::chrono::seconds(10))) return Failure{ErrorCode::timeout, "Audio did not reach a release boundary"};
+    impl->preparedConfig.reset();
     auto response = request(ControlCommand::releaseAudio);
     if (auto* failure = std::get_if<Failure>(&response)) return *failure;
     impl->audio.reset();
@@ -375,11 +508,12 @@ Result<StateEnvelope> BridgeClient::captureState(std::chrono::milliseconds timeo
         if (auto cached = lastState()) return *cached;
         return Failure{ErrorCode::disconnected, "Source state is unavailable before startup"};
     }
+    Deadline deadline(timeout);
     std::unique_lock operation(impl->stateOperations, std::defer_lock);
-    if (!operation.try_lock_for(timeout)) return Failure{ErrorCode::timeout, "Another state operation is pending"};
+    if (!operation.try_lock_for(deadline.remaining())) return Failure{ErrorCode::timeout, "Another state operation is pending"};
     auto checkpointSequence = ++impl->parameterSequence;
     Impl::Resume resume {*impl};
-    if (!impl->pause(timeout)) return Failure{ErrorCode::timeout, "Audio processing did not reach a state boundary"};
+    if (!impl->pause(deadline.remaining())) return Failure{ErrorCode::timeout, "Audio processing did not reach a state boundary"};
     try
     {
         auto pending = impl->audio ? impl->audio->parameterCheckpoint() : std::vector<ParameterEvent>{};
@@ -392,7 +526,7 @@ Result<StateEnvelope> BridgeClient::captureState(std::chrono::milliseconds timeo
             writer.number(parameter.index); writer.floating(parameter.normalized);
             writer.number(parameter.origin); writer.number(parameter.sequence);
         }
-        auto response = request(ControlCommand::captureState, writer.bytes, timeout);
+        auto response = request(ControlCommand::captureState, writer.bytes, deadline.remaining());
         if (auto* failure = std::get_if<Failure>(&response)) return *failure;
         auto decoded = decodeState(std::get<Bytes>(response));
         if (auto* failure = std::get_if<Failure>(&decoded)) return *failure;
@@ -457,11 +591,12 @@ Status BridgeClient::restoreState(const StateEnvelope& state)
         }
     }
     std::unique_lock operation(impl->stateOperations, std::defer_lock);
-    if (!operation.try_lock_for(std::chrono::seconds(10))) return Failure{ErrorCode::timeout, "Another state operation is pending"};
+    Deadline deadline(std::chrono::seconds(10));
+    if (!operation.try_lock_for(deadline.remaining())) return Failure{ErrorCode::timeout, "Another state operation is pending"};
     Impl::Resume resume {*impl};
-    if (!impl->pause(std::chrono::seconds(10))) return Failure{ErrorCode::timeout, "Audio processing did not reach a state boundary"};
+    if (!impl->pause(deadline.remaining())) return Failure{ErrorCode::timeout, "Audio processing did not reach a state boundary"};
     if (impl->audio) impl->audio->reset();
-    return applyState(state, barrier, std::chrono::seconds(10));
+    return applyState(state, barrier, deadline.remaining());
 }
 std::optional<StateEnvelope> BridgeClient::lastState() const
 {

@@ -50,6 +50,7 @@ Result<Control> Control::connect(const std::wstring& endpoint, std::chrono::mill
 }
 Status Control::accept(std::chrono::milliseconds timeout)
 {
+    if (*cancelled) return Failure{ErrorCode::disconnected, "Helper launch cancelled"};
     Handle event(CreateEventW(nullptr, TRUE, FALSE, nullptr));
     OVERLAPPED operation {};
     operation.hEvent = event.get();
@@ -57,6 +58,7 @@ Status Control::accept(std::chrono::milliseconds timeout)
     auto error = GetLastError();
     if (error == ERROR_PIPE_CONNECTED) return std::monostate{};
     if (error != ERROR_IO_PENDING) return Failure{ErrorCode::io, "Bridge accept failed"};
+    if (*cancelled) CancelIoEx(pipe.get(), &operation);
     if (!waitForIo(event.get(), std::chrono::steady_clock::now() + timeout))
     {
         CancelIoEx(pipe.get(), &operation);
@@ -74,6 +76,7 @@ Status Control::transfer(std::span<std::byte> bytes, bool writing, std::chrono::
     if (!event.valid()) return Failure{ErrorCode::io, "Cannot create IO event"};
     while (!bytes.empty())
     {
+        if (*cancelled) return Failure{ErrorCode::disconnected, "Helper channel cancelled"};
         OVERLAPPED operation {};
         operation.hEvent = event.get();
         ResetEvent(event.get());
@@ -84,6 +87,7 @@ Status Control::transfer(std::span<std::byte> bytes, bool writing, std::chrono::
         if (!success)
         {
             if (GetLastError() != ERROR_IO_PENDING) return Failure{ErrorCode::disconnected, "Helper pipe disconnected"};
+            if (*cancelled) CancelIoEx(pipe.get(), &operation);
             if (!waitForIo(event.get(), deadline))
             {
                 CancelIoEx(pipe.get(), &operation);

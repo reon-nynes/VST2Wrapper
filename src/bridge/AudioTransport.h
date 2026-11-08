@@ -96,6 +96,7 @@ public:
     ProcessResult process(AudioBlockView, EventBlockView, const TransportSnapshot&) noexcept;
     ProcessResult process(DoubleAudioBlockView, EventBlockView, const TransportSnapshot&) noexcept;
     void reset() noexcept;
+    void setStopEvent(HANDLE event) noexcept { stopEvent = event; }
     uint32_t latency() const noexcept { return memory->quantum * 2; }
     const std::wstring& name() const { return memory->name; }
     SharedAudio& shared() { return *memory; }
@@ -108,6 +109,7 @@ private:
     int findOutput(uint64_t sequence, bool offline) noexcept;
     void reap(uint64_t before) noexcept;
     std::unique_ptr<SharedAudio> memory;
+    HANDLE stopEvent = nullptr;
     std::vector<float> inputScratch, precisionInput, precisionOutput;
     std::unique_ptr<SharedMidi> midiScratch;
     std::unique_ptr<SharedTransport> transportScratch;

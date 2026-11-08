@@ -20,6 +20,7 @@ private:
     Processor& processor;
     juce::HWNDComponent nativeView;
     juce::String failure;
+    juce::TextButton retry {"Retry this plugin"};
     bool attached = false;
 };
 }

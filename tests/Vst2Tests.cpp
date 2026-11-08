@@ -25,6 +25,19 @@ TEST("Vst2.EntryCallback")
     CHECK(manifest.displayName == "Nytera Fixture");
     CHECK(manifest.parameters.size() == 1);
 }
+TEST("Vst2.InvalidMidiOutput")
+{
+    Fixture fixture(65536);
+    auto instance = require(Vst2Instance::open(NYTERA_FIXTURE));
+    require(instance->prepare({48000, 64, 2, 2, false}));
+    std::array<float, 32> input {}, output {};
+    std::array<const float*, 2> inputs {input.data(), input.data()};
+    std::array<float*, 2> outputs {output.data(), output.data()};
+    bool emitted = false;
+    auto emit = [](void* context, int64_t, std::span<const std::byte>) { *static_cast<bool*>(context) = true; };
+    CHECK(std::holds_alternative<Failure>(instance->process({inputs, outputs, 32}, {{}, &emitted, emit}, {})));
+    CHECK(!emitted);
+}
 TEST("Vst2.TailSemantics")
 {
     {

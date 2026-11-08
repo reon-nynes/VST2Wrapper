@@ -33,6 +33,7 @@ public:
     void getStateInformation(juce::MemoryBlock&) override;
     void setStateInformation(const void*, int) override;
     Status ensureStarted();
+    Status retrySource();
     BridgeClient& bridge() { return client; }
     juce::String diagnostic() const;
 private:
@@ -50,6 +51,8 @@ private:
     juce::MidiBuffer outputMidi;
     int64_t processingPosition = 0;
     std::atomic<bool> audioReady {false};
+    std::atomic<bool> pendingNotesOff {false};
+    std::optional<ProcessConfig> lastConfig;
     juce::String runtimeDiagnostic;
     size_t displayCursor = 0;
     std::atomic<double> tailDuration {moduleBinding().tailSeconds};
