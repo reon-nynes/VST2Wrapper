@@ -37,6 +37,7 @@ struct BridgeClient::Impl
         ready = false;
         notesOff = true;
         phase = BridgePhase::failed;
+        SetEvent(stopEvent.get());
         { std::lock_guard lock(diagnosticMutex); diagnostic = failure.message; }
         current->control->cancel();
     }

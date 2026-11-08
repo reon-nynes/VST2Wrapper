@@ -51,7 +51,7 @@ template<class Sample> static void checkProcessing()
     CHECK(loaded.component->activateBus(kAudio, kOutput, 0, true) == kResultOk);
     CHECK(loaded.component->setActive(true) == kResultOk);
     CHECK(loaded.processor->setProcessing(true) == kResultOk);
-    CHECK(loaded.processor->getLatencySamples() == 128);
+    CHECK(loaded.processor->getLatencySamples() == 0);
     std::array<Sample, 64> input {}, left {}, right {};
     std::array<Sample*, 2> inputs {input.data(), input.data()}, outputs {left.data(), right.data()};
     AudioBusBuffers in {}, out {};
@@ -71,7 +71,7 @@ template<class Sample> static void checkProcessing()
         if (block == 0) input[0] = 1;
         context.projectTimeSamples = block * 64;
         CHECK(loaded.processor->process(data) == kResultOk);
-        for (int i = 0; i < 64; ++i) CHECK(left[static_cast<size_t>(i)] == (block == 2 && i == 0 ? Sample{0.5} : Sample{0}));
+        for (int i = 0; i < 64; ++i) CHECK(left[static_cast<size_t>(i)] == (block == 0 && i == 0 ? Sample{0.5} : Sample{0}));
     }
 }
 TEST("Processor.FloatEntry") { checkProcessing<float>(); }
@@ -167,7 +167,7 @@ static void checkModeSwitch(FUnknown* host = nullptr, bool anticipative = false)
         {
             context.projectTimeSamples = position; position += 64;
             CHECK(loaded.processor->process(data) == kResultOk);
-            if (block >= 2) for (float value : left) CHECK(value == (mode == kOffline ? 4.0f : 2.0f));
+            for (float value : left) CHECK(value == (mode == kOffline ? 4.0f : 2.0f));
             if (mode == kRealtime && !anticipative) Sleep(20);
         }
     }
@@ -255,6 +255,6 @@ TEST("Parameter.Resolution")
         context.projectTimeSamples = block * 64;
         data.inputParameterChanges = block == 0 ? &changes : nullptr;
         CHECK(loaded.processor->process(data) == kResultOk);
-        for (float sample : left) CHECK(sample == (block < 2 ? 0.0f : 0.75f));
+        for (float sample : left) CHECK(sample == 0.75f);
     }
 }

@@ -43,7 +43,9 @@ void AudioWorker::run(std::stop_token token)
         auto& outgoing = memory->outputMidi(index);
         auto& markers = memory->transportMarkers(index);
         auto& parameters = memory->parameters(index);
-        if (slot.frames != memory->quantum || !incoming.valid() || !markers.valid(memory->quantum, slot.transport.streamSamples) || !parameters.valid(memory->quantum))
+        const auto frames = slot.frames;
+        if (frames == 0 || frames > memory->config.maximumBlock || !incoming.valid()
+            || !markers.valid(frames, slot.transport.streamSamples) || !parameters.valid(frames))
         { InterlockedExchange(&memory->header().error, 1); InterlockedExchange(&slot.state, 3); SetEvent(memory->doneEvent()); continue; }
         std::array<const float*, 256> inputs;
         std::array<float*, 256> outputs;
@@ -68,7 +70,7 @@ void AudioWorker::run(std::stop_token token)
             uint32_t start = 0, markerIndex = 0, parameterIndex = 0;
             auto snapshot = slot.transport;
             if (changed) snapshot.flags |= 1;
-            while (start < memory->quantum)
+            while (start < frames)
             {
                 if (markerIndex < markers.count && markers.markers[markerIndex].offset == start)
                     snapshot = markers.markers[markerIndex++].snapshot;
@@ -81,7 +83,7 @@ void AudioWorker::run(std::stop_token token)
                     else memory->acknowledge(event);
                 }
                 if (slot.error) break;
-                uint32_t end = memory->quantum;
+                uint32_t end = frames;
                 if (markerIndex < markers.count) end = markers.markers[markerIndex].offset;
                 if (parameterIndex < parameters.count) end = std::min(end, parameters.events[parameterIndex].offset);
                 midiViews.clear();

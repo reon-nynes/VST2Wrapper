@@ -97,13 +97,13 @@ Result<std::unique_ptr<SharedAudio>> SharedAudio::map(const std::wstring& name, 
         {
             std::memset(result->view, 0, result->totalBytes);
             auto& header = result->header();
-            header.magic = 0x4154594e; header.version = 6; header.quantum = result->quantum;
+            header.magic = 0x4154594e; header.version = 7; header.quantum = result->quantum;
             header.inputs = config.inputs; header.outputs = config.outputs; header.slots = audioSlotCount; header.generation = 1;
             header.parameterCount = config.parameterCount;
             header.programCount = config.programCount;
         }
         auto& header = result->header();
-        if (header.magic != 0x4154594e || header.version != 6 || header.quantum != result->quantum
+        if (header.magic != 0x4154594e || header.version != 7 || header.quantum != result->quantum
             || header.inputs != config.inputs || header.outputs != config.outputs || header.slots != audioSlotCount
             || header.parameterCount != config.parameterCount || header.programCount != config.programCount)
             throw std::runtime_error("Incompatible audio mapping layout");
@@ -152,10 +152,9 @@ void SharedAudio::acknowledgeState(uint64_t sequence) const
 }
 
 AudioTransport::AudioTransport(std::unique_ptr<SharedAudio> shared)
-    : memory(std::move(shared)), midiScratch(std::make_unique<SharedMidi>()), transportScratch(std::make_unique<SharedTransport>()),
+    : memory(std::move(shared)), midiScratch(std::make_unique<SharedMidi>()),
       parameterScratch(std::make_unique<SharedParameters>())
 {
-    inputScratch.resize(size_t(memory->config.inputs) * memory->quantum);
     precisionInput.resize(size_t(memory->config.inputs) * memory->config.maximumBlock);
     precisionOutput.resize(size_t(memory->config.outputs) * memory->config.maximumBlock);
     parameterValues.resize(memory->config.parameterCount);
@@ -171,10 +170,7 @@ Result<std::unique_ptr<AudioTransport>> AudioTransport::create(const std::wstrin
 }
 void AudioTransport::reset() noexcept
 {
-    epoch = clock;
-    filled = 0;
     midiScratch->count = midiScratch->used = 0;
-    transportScratch->count = 0;
     parameterScratch->count = 0;
     if (programEvent && (!programEvent->sequence || programEvent->sequence > memory->programSequence()))
     {
@@ -185,82 +181,77 @@ void AudioTransport::reset() noexcept
         if (parameterSeen[index] && (!parameterSequences[index] || parameterSequences[index] > memory->parameterSequence(index))
             && !parameterScratch->push({index, 0, parameterValues[index], 2, parameterSequences[index]}))
             InterlockedExchange(&memory->header().error, 1);
-    outputSequence = UINT64_MAX;
-    outputSlot = -1;
     ++generation;
     InterlockedExchange(&memory->header().generation, static_cast<LONG>(generation));
     for (uint32_t i = 0; i < audioSlotCount; ++i) InterlockedCompareExchange(&memory->slot(i).state, 0, 1);
-    reap(0);
+    reap();
     pendingNotesOff = true;
 }
-void AudioTransport::reap(uint64_t before) noexcept
+void AudioTransport::reap() noexcept
 {
     for (uint32_t i = 0; i < audioSlotCount; ++i)
     {
         auto& slot = memory->slot(i);
-        if (InterlockedCompareExchange(&slot.state, 0, 0) == 3 && (slot.generation != generation || slot.sequence < before))
+        if (InterlockedCompareExchange(&slot.state, 0, 0) == 3 && slot.generation != generation)
             InterlockedExchange(&slot.state, 0);
     }
 }
-bool AudioTransport::submit() noexcept
+int AudioTransport::submit(AudioBlockView block, const TransportSnapshot& transport) noexcept
 {
     for (uint32_t i = 0; i < audioSlotCount; ++i)
     {
         auto& slot = memory->slot(i);
         if (InterlockedCompareExchange(&slot.state, 4, 0) != 0) continue;
         slot.generation = generation;
-        slot.sequence = static_cast<uint64_t>((inputTransport.streamSamples - epoch) / memory->quantum);
-        slot.transport = inputTransport;
-        slot.frames = memory->quantum;
+        slot.sequence = nextSequence++;
+        slot.transport = transport;
+        slot.transport.streamSamples = clock;
+        if (memory->config.offline) slot.transport.processFlags |= 1;
+        slot.frames = block.samples;
         slot.error = 0;
         for (uint32_t channel = 0; channel < memory->config.inputs; ++channel)
-            std::copy_n(inputScratch.data() + size_t(channel) * memory->quantum, memory->quantum, memory->input(i, channel));
+            std::copy_n(block.inputs[channel], block.samples, memory->input(i, channel));
         auto& midi = memory->inputMidi(i);
         midi.count = midiScratch->count; midi.used = midiScratch->used;
         std::copy_n(midiScratch->events.data(), midi.count, midi.events.data());
         std::copy_n(midiScratch->bytes.data(), midi.used, midi.bytes.data());
         memory->outputMidi(i).count = memory->outputMidi(i).used = 0;
-        auto& markers = memory->transportMarkers(i);
-        markers.count = transportScratch->count;
-        std::copy_n(transportScratch->markers.data(), markers.count, markers.markers.data());
-        transportScratch->count = 0;
+        memory->transportMarkers(i).count = 0;
         auto& parameters = memory->parameters(i);
         parameters.count = parameterScratch->count;
         std::copy_n(parameterScratch->events.data(), parameters.count, parameters.events.data());
         parameterScratch->count = 0;
         midiScratch->count = midiScratch->used = 0;
-        filled = 0;
         InterlockedExchange(&slot.state, 1);
         SetEvent(memory->readyEvent());
-        return true;
+        return static_cast<int>(i);
     }
-    InterlockedExchange(&memory->header().error, 1);
-    return false;
+    return -1;
 }
-int AudioTransport::findOutput(uint64_t sequence, bool offline) noexcept
+bool AudioTransport::waitForOutput(uint32_t index, uint64_t sequence, uint32_t frames, bool offline) noexcept
 {
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    const auto timeout = offline ? std::chrono::milliseconds(30000) : std::chrono::milliseconds(250);
+    const auto deadline = std::chrono::steady_clock::now() + timeout;
+    auto& slot = memory->slot(index);
     for (;;)
     {
-        for (uint32_t i = 0; i < audioSlotCount; ++i)
-        {
-            auto& slot = memory->slot(i);
-            if (InterlockedCompareExchange(&slot.state, 0, 0) == 3 && slot.generation == generation && slot.sequence == sequence)
-                return slot.error == 0 && slot.frames == memory->quantum && memory->outputMidi(i).valid() ? static_cast<int>(i) : -2;
-        }
-        if (InterlockedCompareExchange(&memory->header().error, 0, 0)) return -2;
-        if (!offline) return -1;
+        if (stopEvent && WaitForSingleObject(stopEvent, 0) == WAIT_OBJECT_0) return false;
+        if (InterlockedCompareExchange(&memory->header().error, 0, 0)) return false;
+        if (InterlockedCompareExchange(&slot.state, 0, 0) == 3)
+            return slot.generation == generation && slot.sequence == sequence && slot.error == 0
+                && slot.frames == frames && memory->outputMidi(index).valid();
         auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
-        if (remaining <= 0) return -2;
-        HANDLE events[] {memory->doneEvent(), stopEvent};
-        auto result = WaitForMultipleObjects(stopEvent ? 2 : 1, events, FALSE, static_cast<DWORD>(remaining));
-        if (result != WAIT_OBJECT_0) return -2;
+        if (remaining <= 0) return false;
+        HANDLE handles[] {stopEvent, memory->doneEvent()};
+        auto result = WaitForMultipleObjects(stopEvent ? 2 : 1, stopEvent ? handles : handles + 1, FALSE, static_cast<DWORD>(remaining));
+        if (result != WAIT_OBJECT_0 + (stopEvent ? 1 : 0)) return false;
     }
 }
 ProcessResult AudioTransport::process(AudioBlockView block, EventBlockView events, const TransportSnapshot& transport) noexcept
 {
     auto mute = [&]
     {
+        InterlockedExchange(&memory->header().error, 1);
         for (auto* channel : block.outputs) if (channel) std::fill_n(channel, block.samples, 0.0f);
         return ProcessResult::failed;
     };
@@ -271,17 +262,11 @@ ProcessResult AudioTransport::process(AudioBlockView block, EventBlockView event
     bool playing = (transport.flags & 2) != 0;
     if (hadTransport && ((playing && wasPlaying && transport.projectSamples != expectedProject) || playing != wasPlaying)) reset();
     hadTransport = true; wasPlaying = playing; expectedProject = transport.projectSamples + block.samples;
-    if (pendingNotesOff && events.emit && block.samples > 0)
-    {
-        for (uint8_t channel = 0; channel < 16; ++channel)
-        {
-            std::array<std::byte, 3> message {static_cast<std::byte>(0xb0 | channel), std::byte{123}, std::byte{0}};
-            events.emit(events.context, clock, message);
-        }
-        pendingNotesOff = false;
-    }
     for (const auto& event : events.input)
-        if (event.sample < clock || event.sample >= clock + std::max<uint32_t>(block.samples, 1)) return mute();
+    {
+        if (event.sample < clock || event.sample >= clock + std::max<uint32_t>(block.samples, 1)
+            || !midiScratch->push(event.sample, event.data)) return mute();
+    }
     for (const auto& event : events.parameters)
     {
         if (event.offset >= std::max<uint32_t>(block.samples, 1) || !std::isfinite(event.normalized) || event.normalized < 0
@@ -290,111 +275,48 @@ ProcessResult AudioTransport::process(AudioBlockView block, EventBlockView event
         {
             if (event.index >= memory->config.programCount || event.normalized != 0) return mute();
             if (!programEvent || !event.sequence || event.sequence >= programEvent->sequence) programEvent = event;
-            continue;
-        }
-        if (event.index >= parameterValues.size()) return mute();
-        if (!event.sequence || event.sequence >= parameterSequences[event.index])
-        {
-            parameterValues[event.index] = event.normalized;
-            parameterSequences[event.index] = event.sequence;
-        }
-        parameterSeen[event.index] = 1;
-    }
-    if (block.samples == 0)
-    {
-        for (const auto& event : events.input) if (!midiScratch->push(event.sample, event.data)) return mute();
-        for (auto event : events.parameters)
-        {
-            event.offset = filled;
-            if (!parameterScratch->push(event)) return mute();
-        }
-        return ProcessResult::priming;
-    }
-    bool rendered = false, underrun = false;
-    uint32_t processed = 0;
-    while (processed < block.samples)
-    {
-        const auto quantum = memory->quantum;
-        uint32_t amount = std::min(block.samples - processed, quantum - filled);
-        auto current = clock + processed;
-        auto relative = static_cast<uint64_t>(current - epoch);
-        auto nextTransport = transport;
-        nextTransport.streamSamples = current;
-        if (playing) nextTransport.projectSamples += processed;
-        if (playing && (nextTransport.flags & 512)) nextTransport.ppq += processed * nextTransport.tempo / (60.0 * memory->config.sampleRate);
-        if (memory->config.offline) nextTransport.processFlags |= 1;
-        if (filled == 0)
-        {
-            inputTransport = nextTransport;
         }
         else
         {
-            const auto& previous = transportScratch->count ? transportScratch->markers[transportScratch->count - 1].snapshot : inputTransport;
-            auto difference = nextTransport.streamSamples - previous.streamSamples;
-            auto expectedPpq = previous.ppq + (playing ? difference * previous.tempo / (60.0 * memory->config.sampleRate) : 0);
-            bool changed = nextTransport.flags != previous.flags || nextTransport.processFlags != previous.processFlags
-                || nextTransport.tempo != previous.tempo || nextTransport.numerator != previous.numerator || nextTransport.denominator != previous.denominator
-                || nextTransport.barStart != previous.barStart || nextTransport.cycleStart != previous.cycleStart || nextTransport.cycleEnd != previous.cycleEnd
-                || ((nextTransport.flags & 512) && std::abs(nextTransport.ppq - expectedPpq) > 0.0000001);
-            if (changed)
+            if (event.index >= parameterValues.size()) return mute();
+            if (!event.sequence || event.sequence >= parameterSequences[event.index])
             {
-                if (transportScratch->count == transportScratch->markers.size()) return mute();
-                transportScratch->markers[transportScratch->count++] = {filled, 0, nextTransport};
+                parameterValues[event.index] = event.normalized;
+                parameterSequences[event.index] = event.sequence;
             }
+            parameterSeen[event.index] = 1;
         }
-        for (const auto& event : events.input)
-            if (event.sample >= current && event.sample < current + amount && !midiScratch->push(event.sample, event.data)) return mute();
-        for (auto event : events.parameters)
-            if (event.offset >= processed && event.offset < processed + amount)
-            {
-                event.offset = filled + event.offset - processed;
-                if (!parameterScratch->push(event)) return mute();
-            }
-        for (uint32_t channel = 0; channel < memory->config.inputs; ++channel)
-            std::copy_n(block.inputs[channel] + processed, amount, inputScratch.data() + size_t(channel) * quantum + filled);
-        uint32_t offset = filled;
-        filled += amount;
-        if (filled == quantum && !submit()) return mute();
-        if (relative < uint64_t(quantum) * 2)
-        {
-            for (auto* output : block.outputs) std::fill_n(output + processed, amount, 0.0f);
-        }
-        else
-        {
-            rendered = true;
-            auto sequence = relative / quantum - 2;
-            if (outputSequence != sequence)
-            {
-                reap(sequence);
-                outputSequence = sequence;
-                outputSlot = findOutput(sequence, memory->config.offline || (transport.processFlags & 5));
-                if (outputSlot == -2) return mute();
-                if (outputSlot < 0) { InterlockedIncrement(&memory->header().underruns); underrun = true; }
-            }
-            underrun |= outputSlot < 0;
-            for (uint32_t channel = 0; channel < memory->config.outputs; ++channel)
-            {
-                if (outputSlot >= 0) std::copy_n(memory->output(static_cast<uint32_t>(outputSlot), channel) + offset, amount, block.outputs[channel] + processed);
-                else std::fill_n(block.outputs[channel] + processed, amount, 0.0f);
-            }
-            if (outputSlot >= 0 && events.emit)
-            {
-                auto& midi = memory->outputMidi(static_cast<uint32_t>(outputSlot));
-                for (uint32_t index = 0; index < midi.count; ++index)
-                {
-                    const auto& event = midi.events[index];
-                    auto time = event.sample + latency();
-                    if (time >= current && time < current + amount)
-                        events.emit(events.context, time, std::span(midi.bytes).subspan(event.offset, event.length));
-                }
-            }
-            if (offset + amount == quantum && outputSlot >= 0)
-                InterlockedExchange(&memory->slot(static_cast<uint32_t>(outputSlot)).state, 0);
-        }
-        processed += amount;
+        if (!parameterScratch->push(event)) return mute();
     }
+    if (block.samples == 0) return ProcessResult::priming;
+    const auto sequence = nextSequence;
+    const auto index = submit(block, transport);
+    if (index < 0 || !waitForOutput(static_cast<uint32_t>(index), sequence, block.samples, memory->config.offline || (transport.processFlags & 5)))
+        return mute();
+    const auto slot = static_cast<uint32_t>(index);
+    auto& midi = memory->outputMidi(slot);
+    for (uint32_t i = 0; i < midi.count; ++i)
+        if (midi.events[i].sample < clock || midi.events[i].sample >= clock + block.samples) return mute();
+    for (uint32_t channel = 0; channel < memory->config.outputs; ++channel)
+        std::copy_n(memory->output(slot, channel), block.samples, block.outputs[channel]);
+    if (pendingNotesOff && events.emit)
+    {
+        for (uint8_t channel = 0; channel < 16; ++channel)
+        {
+            std::array<std::byte, 3> message {static_cast<std::byte>(0xb0 | channel), std::byte{123}, std::byte{0}};
+            events.emit(events.context, clock, message);
+        }
+        pendingNotesOff = false;
+    }
+    if (events.emit)
+        for (uint32_t i = 0; i < midi.count; ++i)
+        {
+            const auto& event = midi.events[i];
+            events.emit(events.context, event.sample, std::span(midi.bytes).subspan(event.offset, event.length));
+        }
+    InterlockedExchange(&memory->slot(slot).state, 0);
     clock += block.samples;
-    return underrun ? ProcessResult::underrun : (rendered ? ProcessResult::rendered : ProcessResult::priming);
+    return ProcessResult::rendered;
 }
 ProcessResult AudioTransport::process(DoubleAudioBlockView block, EventBlockView events, const TransportSnapshot& transport) noexcept
 {

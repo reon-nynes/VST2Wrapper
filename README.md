@@ -34,11 +34,11 @@ A failed instance outputs silence and preserves its last complete captured state
 - x86 and x64 Windows VST2 sources inside x64 VST3 outputs.
 - Effects and MIDI instruments with an original editor and fixed parameter/channel topology.
 - Audio, normalized parameters, gestures, source display text, transport information, MIDI and SysEx.
-- Real-time pipelining and finite ordered offline/prefetch rendering, including REAPER background-thread detection.
-- Reported latency of `2 * nextPowerOfTwo(maximumHostBlock) + sourceLatency` samples.
+- Synchronous shared-memory audio processing for real-time, offline and prefetch calls, including REAPER background-thread detection.
+- Zero bridge-added sample latency. Reported latency equals the source plugin's own latency. Each callback waits for its current block, with a 250 ms real-time failure timeout and a 30 s offline/prefetch failure timeout. Communication and source processing consume the host's callback budget.
 - Host float64 buffers converted through the float32 transport.
 - Automation at the pinned JUCE adapter's measured host-block resolution.
-- Up to 4096 MIDI events and 1 MiB of MIDI bytes per quantum, with preallocated large-SysEx storage.
+- Up to 4096 MIDI events and 1 MiB of MIDI bytes per host block, with preallocated large-SysEx storage.
 - Explicit diagnostics for shells, changing topology, invalid metadata, missing dependencies and helper failures.
 
 Source plugins differ in their dependence on host-specific behavior and external components. Observed compatibility and outstanding prerequisites are recorded in [REAPER acceptance results](docs/testing/reaper-acceptance.md).

@@ -73,7 +73,7 @@ TEST("State.BeforeStartup")
     {
         TransportSnapshot time; time.flags = 2; time.projectSamples = block * 64;
         CHECK(restored.process(AudioBlockView{inputs, outputs, 64}, {}, time) != ProcessResult::failed);
-        CHECK(std::all_of(left.begin(), left.end(), [block](float value) { return value == (block < 2 ? 0.0f : 0.8f); }));
+        CHECK(std::all_of(left.begin(), left.end(), [](float value) { return value == 0.8f; }));
     }
 }
 TEST("State.CaptureTimeout")
@@ -133,11 +133,12 @@ TEST("State.QueuedGeneration")
     AudioWorker worker(std::move(memory), *source, sourceMutex);
     {
         std::unique_lock blockWorker(sourceMutex);
-        std::array<float, 64> input {}, left {}, right {};
-        std::array<const float*, 2> inputs {input.data(), input.data()};
-        std::array<float*, 2> outputs {left.data(), right.data()};
-        ParameterEvent old {0, 0, 0.25f, 1, 1};
-        CHECK(transport->process(AudioBlockView{inputs, outputs, 64}, {{}, nullptr, nullptr, std::span(&old, 1)}, {}) != ProcessResult::failed);
+        // Queue a stale block while state restoration owns the source lock.
+        auto& slot = transport->shared().slot(0);
+        slot.generation = 1; slot.sequence = 0; slot.frames = 64;
+        CHECK(transport->shared().parameters(0).push({0, 0, 0.25f, 1, 1}));
+        InterlockedExchange(&slot.state, 1);
+        SetEvent(transport->shared().readyEvent());
         auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
         while (InterlockedCompareExchange(&transport->shared().slot(0).state, 0, 0) != 2)
         {

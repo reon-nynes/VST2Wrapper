@@ -77,7 +77,7 @@ TEST("Parameter.BlockBoundary")
         if (block < 2) session.client.enqueueParameter({0, 0, block == 0 ? 0.25f : 0.75f, 1});
         TransportSnapshot time; time.projectSamples = block * 32; time.flags = 2;
         CHECK(session.client.process(AudioBlockView{inputs, outputs, 32}, {}, time) != ProcessResult::failed);
-        float expected = block < 4 ? 0.0f : block == 4 ? 0.25f : 0.75f;
+        float expected = block == 0 ? 0.25f : 0.75f;
         CHECK(std::all_of(left.begin(), left.end(), [expected](float value) { return value == expected; }));
     }
 }
@@ -147,7 +147,7 @@ TEST("Parameter.Latency")
     SendMessageW(editor.original, WM_COMMAND, 104, 0);
     auto events = require(session.client.takeNotifications());
     CHECK(events.size() == 1 && events[0].opcode == 13 && events[0].value == 32);
-    CHECK(session.client.latencySamples() == 160);
+    CHECK(session.client.latencySamples() == 32);
     session.client.closeEditor();
 }
 TEST("Parameter.CloseGesture")
@@ -378,7 +378,7 @@ static void stateThroughVst3(bool programs)
     {
         context.projectTimeSamples = block * 64;
         CHECK(processor->process(data) == kResultOk);
-        for (float value : left) CHECK(value == (block < 2 ? 0.0f : 0.8f));
+        for (float value : left) CHECK(value == 0.8f);
     }
     context.state = 0;
     CHECK(processor->process(data) == kResultOk);

@@ -97,7 +97,7 @@ public:
     ProcessResult process(DoubleAudioBlockView, EventBlockView, const TransportSnapshot&) noexcept;
     void reset() noexcept;
     void setStopEvent(HANDLE event) noexcept { stopEvent = event; }
-    uint32_t latency() const noexcept { return memory->quantum * 2; }
+    uint32_t latency() const noexcept { return 0; }
     const std::wstring& name() const { return memory->name; }
     SharedAudio& shared() { return *memory; }
     std::vector<ParameterEvent> parameterCheckpoint() const;
@@ -105,24 +105,21 @@ public:
     void restoreCheckpoint(uint32_t program, std::span<const float> values, uint64_t sequence);
 private:
     explicit AudioTransport(std::unique_ptr<SharedAudio>);
-    bool submit() noexcept;
-    int findOutput(uint64_t sequence, bool offline) noexcept;
-    void reap(uint64_t before) noexcept;
+    int submit(AudioBlockView, const TransportSnapshot&) noexcept;
+    bool waitForOutput(uint32_t slot, uint64_t sequence, uint32_t frames, bool offline) noexcept;
+    void reap() noexcept;
     std::unique_ptr<SharedAudio> memory;
     HANDLE stopEvent = nullptr;
-    std::vector<float> inputScratch, precisionInput, precisionOutput;
+    std::vector<float> precisionInput, precisionOutput;
     std::unique_ptr<SharedMidi> midiScratch;
-    std::unique_ptr<SharedTransport> transportScratch;
     std::unique_ptr<SharedParameters> parameterScratch;
     std::vector<float> parameterValues;
     std::vector<uint8_t> parameterSeen;
     std::vector<uint64_t> parameterSequences;
     std::optional<ParameterEvent> programEvent;
-    TransportSnapshot inputTransport;
-    int64_t clock = 0, epoch = 0, expectedProject = 0;
-    uint64_t outputSequence = UINT64_MAX;
-    uint32_t generation = 1, filled = 0;
-    int outputSlot = -1;
+    int64_t clock = 0, expectedProject = 0;
+    uint64_t nextSequence = 0;
+    uint32_t generation = 1;
     bool hadTransport = false, wasPlaying = false, pendingNotesOff = false;
 };
 }

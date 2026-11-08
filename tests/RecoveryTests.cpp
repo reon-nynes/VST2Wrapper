@@ -73,7 +73,7 @@ TEST("Recovery.RetryBinding")
     {
         TransportSnapshot time; time.projectSamples = block * 64; time.flags = 2;
         CHECK(session.client.process(AudioBlockView{inputs, outputs, 64}, {}, time) != ProcessResult::failed);
-        CHECK(left[0] == (block < 2 ? 0.0f : 0.8f));
+        CHECK(left[0] == 0.8f);
     }
 }
 TEST("Recovery.TeardownRace")
@@ -139,7 +139,7 @@ TEST("Recovery.OfflineStop")
     RecoverySession session;
     require(session.client.prepare({48000, 64, 2, 2, true}));
     session.command(112);
-    std::atomic<bool> thirdBlock {false};
+    std::atomic<bool> callbackEntered {false};
     std::jthread render([&]
     {
         std::array<float, 64> input {}, left {}, right {};
@@ -148,11 +148,11 @@ TEST("Recovery.OfflineStop")
         for (int block = 0; block < 3; ++block)
         {
             TransportSnapshot time; time.projectSamples = block * 64; time.flags = 2;
-            if (block == 2) thirdBlock = true;
+            callbackEntered = true;
             session.client.process(AudioBlockView{inputs, outputs, 64}, {}, time);
         }
     });
-    while (!thirdBlock) Sleep(1);
+    while (!callbackEntered) Sleep(1);
     Sleep(40);
     auto before = std::chrono::steady_clock::now();
     session.client.stop(); render.join();

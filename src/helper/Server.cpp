@@ -163,9 +163,7 @@ private:
                     auto mapped = SharedAudio::open(name, config);
                     if (auto* failure = std::get_if<Failure>(&mapped)) throw *failure;
                     auto memory = std::get<std::unique_ptr<SharedAudio>>(std::move(mapped));
-                    auto sourceConfig = config;
-                    sourceConfig.maximumBlock = memory->quantum;
-                    auto prepared = instance->prepare(sourceConfig);
+                    auto prepared = instance->prepare(config);
                     if (auto* failure = std::get_if<Failure>(&prepared)) throw *failure;
                     auto restored = instance->restoreState(std::get<StateEnvelope>(saved));
                     if (auto* failure = std::get_if<Failure>(&restored)) throw *failure;

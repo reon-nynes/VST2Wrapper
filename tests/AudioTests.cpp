@@ -1,4 +1,6 @@
 #include "bridge/BridgeClient.h"
+#include "bridge/AudioTransport.h"
+#include <thread>
 #include "helper/Vst2Instance.h"
 #include "Test.h"
 #include <algorithm>
@@ -12,7 +14,7 @@ struct AudioSession
     uint32_t maximum;
     int64_t position = 0;
     std::array<float, 512> input {}, left {}, right {};
-    explicit AudioSession(uint32_t maximum = 64, std::string variant = "NyteraFixture.dll", bool x86 = false) : maximum(maximum)
+    explicit AudioSession(uint32_t maximum = 64, std::string variant = "NyteraFixture.dll", bool x86 = false, bool offline = true) : maximum(maximum)
     {
         auto root = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build";
         auto source = root / "x64/" NYTERA_TEST_CONFIG / variant;
@@ -23,7 +25,7 @@ struct AudioSession
         manifest.sourceHash = sha256(readFile(source));
         manifest = assignBindingIds(manifest);
         require(client.start(manifest, folder / "NyteraBridge.exe", source));
-        require(client.prepare({48000, maximum, static_cast<uint32_t>(manifest.inputs.size()), static_cast<uint32_t>(manifest.outputs.size()), true}));
+        require(client.prepare({48000, maximum, static_cast<uint32_t>(manifest.inputs.size()), static_cast<uint32_t>(manifest.outputs.size()), offline}));
     }
     ProcessResult block(uint32_t count, std::span<const MidiEvent> midi = {}, void* context = nullptr,
                         void (*emit)(void*, int64_t, std::span<const std::byte>) = nullptr, int64_t project = -1, double bpm = 123, bool playing = true, bool bypass = false)
@@ -44,7 +46,7 @@ struct AudioSession
 static std::vector<float> impulse(bool variable, bool zeroBlocks, bool x86 = false)
 {
     AudioSession session(variable ? 512 : 64, "NyteraDelayFixture.dll", x86);
-    CHECK(session.client.latencySamples() == (variable ? 1040u : 144u));
+    CHECK(session.client.latencySamples() == 16u);
     std::vector<float> result;
     result.reserve(4096);
     const uint32_t sizes[] {1, 63, 64, 127, 256, 511};
@@ -65,15 +67,135 @@ TEST("Audio.ImpulseLatency")
     for (bool x86 : {false, true})
     {
         auto samples = impulse(false, false, x86);
-        for (size_t i = 0; i < samples.size(); ++i) CHECK(samples[i] == (i == 144 ? 0.5f : 0.0f));
+        for (size_t i = 0; i < samples.size(); ++i) CHECK(samples[i] == (i == 16 ? 0.5f : 0.0f));
     }
 }
 TEST("Audio.VariableBlocks")
 {
     auto samples = impulse(true, false);
-    for (size_t i = 0; i < samples.size(); ++i) CHECK(samples[i] == (i == 1040 ? 0.5f : 0.0f));
+    for (size_t i = 0; i < samples.size(); ++i) CHECK(samples[i] == (i == 16 ? 0.5f : 0.0f));
 }
 TEST("Audio.ZeroBlock") { CHECK(impulse(true, true) == impulse(true, false)); }
+TEST("Audio.ZeroLatency")
+{
+    for (bool x86 : {false, true})
+        for (bool offline : {false, true})
+            for (uint32_t maximum : {63u, 64u, 512u})
+            {
+                AudioSession session(maximum, "NyteraFixture.dll", x86, offline);
+                CHECK(session.client.latencySamples() == 0);
+                for (uint32_t frames : {1u, maximum, 17u, 0u, maximum - 1})
+                {
+                    session.input.fill(0.8f);
+                    session.left.fill(-1);
+                    CHECK(session.block(frames) != ProcessResult::failed);
+                    for (uint32_t i = 0; i < frames; ++i) CHECK(session.left[i] == 0.4f);
+                    if (frames < session.left.size()) CHECK(session.left[frames] == -1);
+                }
+            }
+}
+TEST("Audio.ZeroBlockEvents")
+{
+    for (bool x86 : {false, true})
+    {
+        AudioSession session(64, "NyteraInstrumentFixture.dll", x86);
+        std::array<std::byte, 3> on {std::byte{0x90}, std::byte{60}, std::byte{100}};
+        MidiEvent note {0, on};
+        session.client.enqueueParameter({0, 0, 0.75f, 1});
+        CHECK(session.block(0, std::span(&note, 1)) != ProcessResult::failed);
+        CHECK(session.block(0) != ProcessResult::failed);
+        std::vector<int64_t> emitted;
+        auto emit = [](void* context, int64_t sample, std::span<const std::byte>)
+        { static_cast<std::vector<int64_t>*>(context)->push_back(sample); };
+        CHECK(session.block(1, {}, &emitted, emit) == ProcessResult::rendered);
+        CHECK(session.left[0] == 0.75f);
+        CHECK(emitted == std::vector<int64_t>{0});
+        CHECK(session.block(1, {}, &emitted, emit) == ProcessResult::rendered);
+        CHECK(emitted.size() == 1);
+    }
+}
+TEST("Audio.InPlace")
+{
+    for (bool x86 : {false, true})
+    {
+        AudioSession session(63, "NyteraFixture.dll", x86, false);
+        std::array<float, 63> left, right;
+        left.fill(0.8f); right.fill(0.2f);
+        std::array<const float*, 2> inputs {left.data(), right.data()};
+        std::array<float*, 2> outputs {left.data(), right.data()};
+        CHECK(session.client.process(AudioBlockView{inputs, outputs, 17}, {}, {}) == ProcessResult::rendered);
+        for (size_t i = 0; i < left.size(); ++i)
+        {
+            CHECK(left[i] == (i < 17 ? 0.4f : 0.8f));
+            CHECK(right[i] == (i < 17 ? 0.1f : 0.2f));
+        }
+    }
+}
+TEST("Audio.InvalidCompletion")
+{
+    for (int fault = 0; fault < 4; ++fault)
+    {
+        auto name = L"Local\\Nytera-invalid-completion-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(fault);
+        auto audio = require(AudioTransport::create(name, {48000, 64, 2, 2, false}));
+        std::jthread worker([&]
+        {
+            if (WaitForSingleObject(audio->shared().readyEvent(), 2000) != WAIT_OBJECT_0) return;
+            auto& slot = audio->shared().slot(0);
+            if (fault == 0) ++slot.sequence;
+            if (fault == 1) ++slot.generation;
+            if (fault == 2) ++slot.frames;
+            if (fault == 3)
+            {
+                std::array<std::byte, 3> note {std::byte{0x90}, std::byte{60}, std::byte{100}};
+                audio->shared().outputMidi(0).push(64, note);
+            }
+            InterlockedExchange(&slot.state, 3);
+            SetEvent(audio->shared().doneEvent());
+        });
+        std::array<float, 64> input {}, left, right;
+        left.fill(1); right.fill(1);
+        std::array<const float*, 2> inputs {input.data(), input.data()};
+        std::array<float*, 2> outputs {left.data(), right.data()};
+        CHECK(audio->process(AudioBlockView{inputs, outputs, 64}, {}, {}) == ProcessResult::failed);
+        CHECK(std::all_of(left.begin(), left.end(), [](float value) { return value == 0; }));
+        CHECK(InterlockedCompareExchange(&audio->shared().slot(0).state, 0, 0) == 3);
+    }
+}
+TEST("Audio.SynchronousTimeout")
+{
+    auto audio = require(AudioTransport::create(L"Local\\Nytera-timeout-" + std::to_wstring(GetCurrentProcessId()), {48000, 64, 2, 2, false}));
+    std::array<float, 64> input {}, left, right;
+    left.fill(1); right.fill(1);
+    std::array<const float*, 2> inputs {input.data(), input.data()};
+    std::array<float*, 2> outputs {left.data(), right.data()};
+    auto before = std::chrono::steady_clock::now();
+    CHECK(audio->process(AudioBlockView{inputs, outputs, 64}, {}, {}) == ProcessResult::failed);
+    auto elapsed = std::chrono::steady_clock::now() - before;
+    CHECK(elapsed >= std::chrono::milliseconds(200) && elapsed < std::chrono::seconds(2));
+    CHECK(std::all_of(left.begin(), left.end(), [](float value) { return value == 0; }));
+    CHECK(InterlockedCompareExchange(&audio->shared().header().error, 0, 0) != 0);
+    CHECK(InterlockedCompareExchange(&audio->shared().slot(0).state, 0, 0) == 1);
+    CHECK(audio->process(AudioBlockView{inputs, outputs, 64}, {}, {}) == ProcessResult::failed);
+}
+TEST("Audio.SynchronousCancel")
+{
+    auto audio = require(AudioTransport::create(L"Local\\Nytera-cancel-" + std::to_wstring(GetCurrentProcessId()), {48000, 64, 2, 2, true}));
+    Handle stop(CreateEventW(nullptr, TRUE, FALSE, nullptr));
+    audio->setStopEvent(stop.get());
+    ProcessResult result = ProcessResult::rendered;
+    std::array<float, 64> input {}, left, right;
+    left.fill(1); right.fill(1);
+    std::array<const float*, 2> inputs {input.data(), input.data()};
+    std::array<float*, 2> outputs {left.data(), right.data()};
+    std::jthread callback([&] { result = audio->process(AudioBlockView{inputs, outputs, 64}, {}, {}); });
+    CHECK(WaitForSingleObject(audio->shared().readyEvent(), 2000) == WAIT_OBJECT_0);
+    auto before = std::chrono::steady_clock::now();
+    SetEvent(stop.get());
+    callback.join();
+    CHECK(result == ProcessResult::failed);
+    CHECK(std::chrono::steady_clock::now() - before < std::chrono::milliseconds(500));
+    CHECK(std::all_of(left.begin(), left.end(), [](float value) { return value == 0; }));
+}
 TEST("Audio.ZeroBlockCleanup")
 {
     AudioSession session(64, "NyteraInstrumentFixture.dll");
@@ -89,9 +211,11 @@ TEST("Audio.ZeroBlockCleanup")
     CHECK(session.block(0, {}, &outgoing, emit, 10000, 123, false) != ProcessResult::failed);
     CHECK(outgoing.empty());
     CHECK(session.block(64, {}, &outgoing, emit, 10000, 123, false) != ProcessResult::failed);
-    CHECK(outgoing.size() == 16);
+    CHECK(outgoing.size() == 48);
     for (uint8_t channel = 0; channel < 16; ++channel)
         CHECK(outgoing[channel].second == Bytes({static_cast<std::byte>(0xb0 | channel), std::byte{123}, std::byte{0}}));
+    for (uint8_t i = 0; i < 32; ++i)
+        CHECK(outgoing[16 + i].second == Bytes({static_cast<std::byte>(0xb0 | (i / 2)), static_cast<std::byte>(i % 2 == 0 ? 123 : 120), std::byte{0}}));
     outgoing.clear();
     CHECK(session.block(64, {}, &outgoing, emit, 10000, 123, false) != ProcessResult::failed);
     CHECK(outgoing.empty());
@@ -126,9 +250,9 @@ static void midiAlignment(bool x86)
         CHECK(session.block(64, i == 0 ? std::span<const MidiEvent>(events) : std::span<const MidiEvent>{}, &outgoing, emit) != ProcessResult::failed);
         samples.insert(samples.end(), session.left.begin(), session.left.begin() + 64);
     }
-    for (size_t i = 0; i < samples.size(); ++i) CHECK(samples[i] == (i >= 138 && i < 168 ? 0.5f : 0.0f));
+    for (size_t i = 0; i < samples.size(); ++i) CHECK(samples[i] == (i >= 10 && i < 40 ? 0.5f : 0.0f));
     CHECK(outgoing.size() == 2);
-    CHECK(outgoing[0].first == 138 && outgoing[1].first == 168);
+    CHECK(outgoing[0].first == 10 && outgoing[1].first == 40);
     CHECK(outgoing[0].second == Bytes(on.begin(), on.end()));
 }
 TEST("Audio.MidiAlignment") { midiAlignment(false); midiAlignment(true); }
@@ -146,7 +270,7 @@ TEST("Audio.Sysex")
         for (int i = 0; i < 5; ++i)
             CHECK(session.block(64, i == 0 ? std::span(&event, 1) : std::span<MidiEvent>{}, &outgoing, emit) != ProcessResult::failed);
         CHECK(outgoing.size() == 1);
-        CHECK(outgoing[0].first == 145 && outgoing[0].second == message);
+        CHECK(outgoing[0].first == 17 && outgoing[0].second == message);
     }
 }
 TEST("Audio.DoubleInput")
@@ -160,7 +284,7 @@ TEST("Audio.DoubleInput")
         input.fill(0); if (i == 0) input[0] = 2;
         TransportSnapshot snapshot; snapshot.projectSamples = i * 64; snapshot.flags = 2;
         CHECK(session.client.process(DoubleAudioBlockView{inputs, outputs, 64}, {}, snapshot) != ProcessResult::failed);
-        CHECK(left[0] == (i == 2 ? 1.0 : 0.0));
+        CHECK(left[0] == (i == 0 ? 1.0 : 0.0));
     }
 }
 TEST("Audio.Offline")
@@ -170,7 +294,7 @@ TEST("Audio.Offline")
     {
         CHECK(session.block(64) != ProcessResult::failed);
         for (int sample = 0; sample < 64; ++sample)
-            CHECK(session.left[static_cast<size_t>(sample)] == (block < 2 ? 0.0f : static_cast<float>((block - 2) * 64 + sample)));
+            CHECK(session.left[static_cast<size_t>(sample)] == static_cast<float>(block * 64 + sample));
     }
 }
 TEST("Audio.CallbackAllocations")
@@ -195,8 +319,9 @@ TEST("Audio.StoppedPosition")
         CHECK(session.block(48, {}, nullptr, nullptr, 1000, 123, false) != ProcessResult::failed);
         samples.insert(samples.end(), session.left.begin(), session.left.begin() + 48);
     }
-    CHECK(samples[128] == 1000);
-    CHECK(samples[192] == 1000);
+    CHECK(samples[0] == 1000);
+    CHECK(samples[48] == 1000);
+    CHECK(samples[47] == 1047);
 }
 TEST("Audio.TempoBoundary")
 {
@@ -207,9 +332,9 @@ TEST("Audio.TempoBoundary")
         CHECK(session.block(32, {}, nullptr, nullptr, -1, i == 0 ? 123 : 124) != ProcessResult::failed);
         samples.insert(samples.end(), session.left.begin(), session.left.begin() + 32);
     }
-    CHECK(samples[128] == 0);
-    CHECK(samples[159] == 31);
-    CHECK(samples[160] == -999);
+    CHECK(samples[0] == 0);
+    CHECK(samples[31] == 31);
+    CHECK(samples[32] == -999);
 }
 TEST("Audio.BypassLatency")
 {
