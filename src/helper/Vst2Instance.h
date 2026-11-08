@@ -15,6 +15,9 @@ public:
     ~Vst2Instance();
     Result<Manifest> inspect();
     Status prepare(const ProcessConfig&);
+    void suspend();
+    Status process(AudioBlockView, EventBlockView, const TransportSnapshot&);
+    void resetEvents();
     void close() noexcept;
     intptr_t dispatch(int32_t opcode, int32_t index = 0, intptr_t value = 0, void* pointer = nullptr, float real = 0);
     vst_effect_t* native() const { return effect; }
@@ -29,6 +32,16 @@ private:
     std::string sourceDirectory;
     ProcessConfig config;
     bool opened = false, prepared = false;
+    std::unique_ptr<Vst2Events> events;
+    std::vector<vst_event_midi_t> midiEvents;
+    std::vector<vst_event_midi_sysex_t> sysexEvents;
+    std::vector<double> doubleInputs, doubleOutputs;
+    std::vector<float> dryDelay;
+    uint32_t dryPosition = 0, dryLatency = 0;
+    bool flushNotes = false;
+    static thread_local Vst2Instance* processing;
+    static thread_local const TransportSnapshot* processTransport;
+    static thread_local EventBlockView* processEvents;
     static thread_local Vst2Instance* constructing;
 };
 }

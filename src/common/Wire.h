@@ -5,7 +5,7 @@ namespace nytera
 enum class ControlCommand : uint32_t
 {
     hello = 1, inspect, poll, shutdown, openEditor, closeEditor, prepare,
-    captureState, restoreState, connectAudio, parameter, display, fixture
+    captureState, restoreState, connectAudio, parameter, display, fixture, releaseAudio
 };
 struct Frame
 {

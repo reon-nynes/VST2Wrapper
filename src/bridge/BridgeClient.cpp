@@ -1,5 +1,6 @@
 #include "BridgeClient.h"
 #include "Control.h"
+#include "AudioTransport.h"
 #include "common/Codec.h"
 #include <bcrypt.h>
 #include <mutex>
@@ -13,6 +14,9 @@ struct BridgeClient::Impl
     Handle process, job;
     std::atomic<uint32_t> pid {0};
     std::atomic<uint32_t> editorWidth {480}, editorHeight {320};
+    std::atomic<uint32_t> totalLatency {0};
+    std::unique_ptr<AudioTransport> audio;
+    uint32_t audioGeneration = 0;
     std::string pipeName;
     uint32_t sequence = 0;
     Result<Bytes> exchange(ControlCommand command, std::span<const std::byte> payload, std::chrono::milliseconds timeout)
@@ -42,6 +46,7 @@ Status BridgeClient::start(const Manifest& manifest, const std::filesystem::path
     std::unique_lock lock(impl->mutex);
     try
     {
+        impl->totalLatency = manifest.initialDelay;
         Id128 random;
         if (BCryptGenRandom(nullptr, reinterpret_cast<PUCHAR>(random.data()), static_cast<ULONG>(random.size()), BCRYPT_USE_SYSTEM_PREFERRED_RNG) < 0)
             throw std::runtime_error("Cannot generate instance ID");
@@ -105,6 +110,7 @@ void BridgeClient::stop() noexcept
     try
     {
         std::unique_lock lock(impl->mutex);
+        if (impl->audio) InterlockedExchange(&impl->audio->shared().header().error, 1);
         if (impl->control) impl->exchange(ControlCommand::shutdown, {}, std::chrono::seconds(2));
         impl->control.reset();
         if (impl->process.valid() && WaitForSingleObject(impl->process.get(), 2000) != WAIT_OBJECT_0)
@@ -152,4 +158,48 @@ void BridgeClient::closeEditor() noexcept
     try { request(ControlCommand::closeEditor, {}, std::chrono::seconds(2)); } catch (...) {}
 }
 Size BridgeClient::editorSize() const noexcept { return {impl->editorWidth.load(), impl->editorHeight.load()}; }
+Status BridgeClient::prepare(const ProcessConfig& config)
+{
+    auto name = L"Local\\NyteraAudio-" + std::to_wstring(GetCurrentProcessId()) + L"-" + std::to_wstring(impl->pid.load())
+        + L"-" + std::to_wstring(++impl->audioGeneration);
+    auto created = AudioTransport::create(name, config);
+    if (auto* failure = std::get_if<Failure>(&created)) return *failure;
+    auto audio = std::get<std::unique_ptr<AudioTransport>>(std::move(created));
+    Writer writer;
+    writer.text(pathUtf8(name)); writer.floating(config.sampleRate);
+    writer.number(config.maximumBlock); writer.number(config.inputs); writer.number(config.outputs); writer.boolean(config.offline);
+    auto connected = request(ControlCommand::connectAudio, writer.bytes);
+    if (auto* failure = std::get_if<Failure>(&connected)) return *failure;
+    try
+    {
+        Reader response(std::get<Bytes>(connected));
+        auto sourceLatency = response.number<uint32_t>();
+        response.finish();
+        impl->totalLatency = audio->latency() + sourceLatency;
+        impl->audio = std::move(audio);
+        return std::monostate{};
+    }
+    catch (const std::exception& error) { return Failure{ErrorCode::invalidData, error.what()}; }
+}
+ProcessResult BridgeClient::process(AudioBlockView block, EventBlockView events, const TransportSnapshot& transport) noexcept
+{
+    if (impl->audio) return impl->audio->process(block, events, transport);
+    for (auto* output : block.outputs) std::fill_n(output, block.samples, 0.0f);
+    return ProcessResult::failed;
+}
+ProcessResult BridgeClient::process(DoubleAudioBlockView block, EventBlockView events, const TransportSnapshot& transport) noexcept
+{
+    if (impl->audio) return impl->audio->process(block, events, transport);
+    for (auto* output : block.outputs) std::fill_n(output, block.samples, 0.0);
+    return ProcessResult::failed;
+}
+uint32_t BridgeClient::latencySamples() const noexcept { return impl->totalLatency.load(); }
+Status BridgeClient::releaseAudio()
+{
+    auto response = request(ControlCommand::releaseAudio);
+    if (auto* failure = std::get_if<Failure>(&response)) return *failure;
+    impl->audio.reset();
+    return std::monostate{};
+}
+void BridgeClient::resetProcessing() noexcept { if (impl->audio) impl->audio->reset(); }
 }

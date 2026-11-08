@@ -27,7 +27,7 @@ Result<uint32_t> framePayloadSize(std::span<const std::byte> data)
         if (reader.number<uint32_t>() != 0x3142594e || reader.number<uint32_t>() != 1)
             throw std::runtime_error("Incompatible bridge protocol");
         auto command = static_cast<ControlCommand>(reader.number<uint32_t>());
-        if (command < ControlCommand::hello || command > ControlCommand::fixture)
+        if (command < ControlCommand::hello || command > ControlCommand::releaseAudio)
             throw std::runtime_error("Unknown bridge command");
         reader.number<uint32_t>();
         auto size = reader.number<uint32_t>();

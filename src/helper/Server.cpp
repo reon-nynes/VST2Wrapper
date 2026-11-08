@@ -1,6 +1,7 @@
 #include "Server.h"
 #include "Vst2Instance.h"
 #include "EditorHost.h"
+#include "AudioWorker.h"
 #include "bridge/Control.h"
 #include "common/Codec.h"
 #include <mutex>
@@ -19,6 +20,7 @@ public:
     ~HelperServer()
     {
         if (instance) instance->onNotification = {};
+        audio.reset();
         editor.reset();
         instance.reset();
     }
@@ -110,6 +112,34 @@ private:
                     break;
                 }
                 case ControlCommand::closeEditor: editor.reset(); break;
+                case ControlCommand::releaseAudio:
+                    audio.reset();
+                    instance->suspend();
+                    break;
+                case ControlCommand::connectAudio:
+                {
+                    Reader reader(request.payload);
+                    auto name = utf8Path(reader.text()).wstring();
+                    ProcessConfig config;
+                    config.sampleRate = reader.real64(); config.maximumBlock = reader.number<uint32_t>();
+                    config.inputs = reader.number<uint32_t>(); config.outputs = reader.number<uint32_t>(); config.offline = reader.boolean();
+                    reader.finish();
+                    if (config.inputs != actual.inputs.size() || config.outputs != actual.outputs.size())
+                        throw Failure{ErrorCode::invalidData, "Requested channels differ from source topology"};
+                    audio.reset();
+                    auto mapped = SharedAudio::open(name, config);
+                    if (auto* failure = std::get_if<Failure>(&mapped)) throw *failure;
+                    auto memory = std::get<std::unique_ptr<SharedAudio>>(std::move(mapped));
+                    auto sourceConfig = config;
+                    sourceConfig.maximumBlock = memory->quantum;
+                    auto prepared = instance->prepare(sourceConfig);
+                    if (auto* failure = std::get_if<Failure>(&prepared)) throw *failure;
+                    audio = std::make_unique<AudioWorker>(std::move(memory), *instance, sourceMutex);
+                    Writer writer;
+                    writer.number(static_cast<uint32_t>(std::max(0, instance->native()->delay)));
+                    response.payload = std::move(writer.bytes);
+                    break;
+                }
                 case ControlCommand::poll:
                 {
                     std::vector<HostNotification> pending;
@@ -150,6 +180,8 @@ private:
     std::string token;
     std::unique_ptr<Vst2Instance> instance;
     std::unique_ptr<EditorHost> editor;
+    std::unique_ptr<AudioWorker> audio;
+    std::mutex sourceMutex;
     Manifest expected, actual;
     bool running = true;
     std::mutex notificationMutex;

@@ -12,6 +12,9 @@ static void trace(const char* stage)
     if (GetEnvironmentVariableA("NYTERA_TRACE", enabled, sizeof(enabled))) std::clog << stage << std::endl;
 }
 thread_local Vst2Instance* Vst2Instance::constructing = nullptr;
+thread_local Vst2Instance* Vst2Instance::processing = nullptr;
+thread_local const TransportSnapshot* Vst2Instance::processTransport = nullptr;
+thread_local EventBlockView* Vst2Instance::processEvents = nullptr;
 Result<std::unique_ptr<Vst2Instance>> Vst2Instance::open(const std::filesystem::path& path)
 {
     auto architecture = inspectPeArchitecture(path);
@@ -115,18 +118,134 @@ Status Vst2Instance::prepare(const ProcessConfig& next)
     if (!std::isfinite(next.sampleRate) || next.sampleRate < 1000 || next.sampleRate > 768000
         || next.maximumBlock == 0 || next.maximumBlock > 65536)
         return Failure{ErrorCode::invalidData, "Invalid processing configuration"};
-    if (prepared)
-    {
-        dispatch(VST_EFFECT_OPCODE_PROCESS_END);
-        dispatch(VST_EFFECT_OPCODE_SUSPEND_RESUME, 0, 0);
-    }
+    suspend();
     config = next;
+    events = std::make_unique<Vst2Events>();
+    midiEvents.resize(4128);
+    sysexEvents.resize(4096);
+    doubleInputs.resize(size_t(effect->num_inputs) * config.maximumBlock);
+    doubleOutputs.resize(size_t(effect->num_outputs) * config.maximumBlock);
+    dryLatency = static_cast<uint32_t>(std::max(0, effect->delay));
+    if (uint64_t(dryLatency) * effect->num_outputs * sizeof(float) > 256 * 1024 * 1024)
+        return Failure{ErrorCode::unsupported, "Source bypass delay exceeds 256 MiB capacity"};
+    dryDelay.assign(size_t(dryLatency) * effect->num_outputs, 0);
+    dryPosition = 0;
     dispatch(VST_EFFECT_OPCODE_SET_SAMPLE_RATE, 0, 0, nullptr, static_cast<float>(config.sampleRate));
     dispatch(VST_EFFECT_OPCODE_SET_BLOCK_SIZE, 0, config.maximumBlock);
     dispatch(VST_EFFECT_OPCODE_SUSPEND_RESUME, 0, 1);
     dispatch(VST_EFFECT_OPCODE_PROCESS_BEGIN);
     prepared = true;
     return std::monostate{};
+}
+void Vst2Instance::suspend()
+{
+    if (!prepared) return;
+    resetEvents();
+    dispatch(VST_EFFECT_OPCODE_PROCESS_END);
+    dispatch(VST_EFFECT_OPCODE_SUSPEND_RESUME, 0, 0);
+    prepared = false;
+}
+Status Vst2Instance::process(AudioBlockView block, EventBlockView midi, const TransportSnapshot& transport)
+{
+    if (!prepared || block.samples > config.maximumBlock || block.inputs.size() != static_cast<size_t>(effect->num_inputs)
+        || block.outputs.size() != static_cast<size_t>(effect->num_outputs) || midi.input.size() > 4096)
+        return Failure{ErrorCode::plugin, "Source topology or processing bounds changed"};
+    processing = this; processTransport = &transport; processEvents = &midi;
+    try
+    {
+        events->count = 0;
+        size_t resetCount = flushNotes ? 32 : 0;
+        flushNotes = false;
+        for (size_t i = 0; i < resetCount; ++i)
+        {
+            auto& event = midiEvents[i];
+            std::memset(&event, 0, sizeof(event));
+            event.event.type = VST_EVENT_TYPE_MIDI;
+            event.event.size = sizeof(event);
+            event.midi.data[0] = static_cast<char>(0xb0 | (i / 2));
+            event.midi.data[1] = static_cast<char>(i % 2 == 0 ? 123 : 120);
+            events->events[events->count++] = &event.event;
+        }
+        for (size_t index = 0; index < midi.input.size(); ++index)
+        {
+            const auto& message = midi.input[index];
+            auto offset = message.sample - transport.streamSamples;
+            if (message.data.empty() || offset < 0 || offset >= block.samples) throw std::runtime_error("Invalid MIDI timing");
+            if (message.data[0] == std::byte{0xf0})
+            {
+                auto& event = sysexEvents[index];
+                std::memset(&event, 0, sizeof(event));
+                event.event.type = VST_EVENT_TYPE_MIDI_SYSEX;
+                event.event.size = sizeof(event);
+                event.event.offset = static_cast<int32_t>(offset);
+                event.sysex.size = static_cast<int32_t>(message.data.size());
+                event.sysex.data = reinterpret_cast<char*>(const_cast<std::byte*>(message.data.data()));
+                events->events[events->count++] = &event.event;
+            }
+            else
+            {
+                if (message.data.size() > 3) throw std::runtime_error("Invalid short MIDI message");
+                auto& event = midiEvents[index + resetCount];
+                std::memset(&event, 0, sizeof(event));
+                event.event.type = VST_EVENT_TYPE_MIDI;
+                event.event.size = sizeof(event);
+                event.event.offset = static_cast<int32_t>(offset);
+                std::memcpy(event.midi.data, message.data.data(), message.data.size());
+                events->events[events->count++] = &event.event;
+            }
+        }
+        if (events->count) dispatch(VST_EFFECT_OPCODE_EVENT, 0, 0, events.get());
+        std::array<float*, 256> nativeOutputs;
+        std::copy(block.outputs.begin(), block.outputs.end(), nativeOutputs.begin());
+        for (auto* output : block.outputs) std::fill_n(output, block.samples, 0.0f);
+        if (effect->process_float)
+            effect->process_float(effect, block.inputs.data(), nativeOutputs.data(), static_cast<int32_t>(block.samples));
+        else if (effect->process)
+            effect->process(effect, block.inputs.data(), nativeOutputs.data(), static_cast<int32_t>(block.samples));
+        else
+        {
+            std::array<const double*, 256> inputs;
+            std::array<double*, 256> outputs;
+            for (size_t channel = 0; channel < block.inputs.size(); ++channel)
+            {
+                auto* target = doubleInputs.data() + channel * config.maximumBlock;
+                std::copy_n(block.inputs[channel], block.samples, target);
+                inputs[channel] = target;
+            }
+            for (size_t channel = 0; channel < block.outputs.size(); ++channel)
+                outputs[channel] = doubleOutputs.data() + channel * config.maximumBlock;
+            effect->process_double(effect, inputs.data(), outputs.data(), static_cast<int32_t>(block.samples));
+            for (size_t channel = 0; channel < block.outputs.size(); ++channel)
+                for (uint32_t i = 0; i < block.samples; ++i) block.outputs[channel][i] = static_cast<float>(outputs[channel][i]);
+        }
+        for (uint32_t sample = 0; sample < block.samples; ++sample)
+        {
+            for (size_t channel = 0; channel < block.outputs.size(); ++channel)
+            {
+                float dry = channel < block.inputs.size() ? block.inputs[channel][sample] : 0.0f;
+                if (dryLatency)
+                {
+                    auto& delayed = dryDelay[channel * dryLatency + dryPosition];
+                    std::swap(dry, delayed);
+                }
+                if (transport.processFlags & 2) block.outputs[channel][sample] = dry;
+            }
+            if (dryLatency) dryPosition = (dryPosition + 1) % dryLatency;
+        }
+        processing = nullptr; processTransport = nullptr; processEvents = nullptr;
+        return std::monostate{};
+    }
+    catch (const std::exception& error)
+    {
+        processing = nullptr; processTransport = nullptr; processEvents = nullptr;
+        return Failure{ErrorCode::plugin, error.what()};
+    }
+}
+void Vst2Instance::resetEvents()
+{
+    flushNotes = true;
+    std::fill(dryDelay.begin(), dryDelay.end(), 0.0f);
+    dryPosition = 0;
 }
 void Vst2Instance::close() noexcept
 {
@@ -156,6 +275,51 @@ intptr_t Vst2Instance::hostCall(int32_t opcode, int32_t index, intptr_t value, v
 {
     switch (opcode)
     {
+        case 7:
+        {
+            thread_local Vst2TimeInfo time;
+            time = {};
+            time.sampleRate = config.sampleRate;
+            if (processing == this && processTransport)
+            {
+                const auto& snapshot = *processTransport;
+                time.samplePosition = static_cast<double>(snapshot.projectSamples);
+                time.ppq = snapshot.ppq; time.tempo = snapshot.tempo; time.barStart = snapshot.barStart;
+                time.cycleStart = snapshot.cycleStart; time.cycleEnd = snapshot.cycleEnd;
+                time.numerator = snapshot.numerator; time.denominator = snapshot.denominator;
+                time.flags = static_cast<int32_t>(snapshot.flags);
+            }
+            return reinterpret_cast<intptr_t>(&time);
+        }
+        case VST_HOST_OPCODE_EVENT:
+        {
+            if (processing != this || !processEvents || !processEvents->emit || !pointer) return 0;
+            auto& list = *static_cast<Vst2Events*>(pointer);
+            if (list.count < 0 || list.count > 4096) return 0;
+            for (int32_t i = 0; i < list.count; ++i)
+            {
+                auto* event = list.events[i];
+                if (!event || event->offset < 0 || event->offset >= static_cast<int32_t>(config.maximumBlock)) return 0;
+                std::span<const std::byte> bytes;
+                if (event->type == VST_EVENT_TYPE_MIDI)
+                {
+                    auto* message = reinterpret_cast<vst_event_midi_t*>(event);
+                    auto status = static_cast<uint8_t>(message->midi.data[0]);
+                    uint32_t length = 3;
+                    if ((status & 0xf0) == 0xc0 || (status & 0xf0) == 0xd0 || status == 0xf1 || status == 0xf3) length = 2;
+                    else if (status >= 0xf4 || status == 0xf0) length = 1;
+                    bytes = {reinterpret_cast<const std::byte*>(message->midi.data), length};
+                }
+                else if (event->type == VST_EVENT_TYPE_MIDI_SYSEX)
+                {
+                    auto* message = reinterpret_cast<vst_event_midi_sysex_t*>(event);
+                    if (message->sysex.size < 0 || message->sysex.size > 1024 * 1024 || !message->sysex.data) return 0;
+                    bytes = {reinterpret_cast<const std::byte*>(message->sysex.data), static_cast<size_t>(message->sysex.size)};
+                }
+                if (!bytes.empty()) processEvents->emit(processEvents->context, processTransport->streamSamples + event->offset, bytes);
+            }
+            return 1;
+        }
         case VST_HOST_OPCODE_VST_VERSION: return 2400;
         case VST_HOST_OPCODE_GET_SAMPLE_RATE: return static_cast<intptr_t>(config.sampleRate);
         case VST_HOST_OPCODE_GET_BLOCK_SIZE: return config.maximumBlock;
@@ -166,7 +330,7 @@ intptr_t Vst2Instance::hostCall(int32_t opcode, int32_t index, intptr_t value, v
         case VST_HOST_OPCODE_VENDOR_VERSION: return 100;
         case VST_HOST_OPCODE_LANGUAGE: return 1;
         case VST_HOST_OPCODE_GET_EFFECT_DIRECTORY: return reinterpret_cast<intptr_t>(sourceDirectory.c_str());
-        case VST_HOST_OPCODE_GET_ACTIVE_THREAD: return config.offline ? 4 : 2;
+        case VST_HOST_OPCODE_GET_ACTIVE_THREAD: return processing == this && processTransport ? ((processTransport->processFlags & 1) ? 4 : 2) : 1;
         case VST_HOST_OPCODE_SUPPORTS:
             if (pointer)
             {

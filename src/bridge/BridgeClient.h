@@ -23,6 +23,12 @@ public:
     Status openEditor(uint64_t parentWindow, float scale = 1.0f);
     void closeEditor() noexcept;
     Size editorSize() const noexcept;
+    Status prepare(const ProcessConfig&);
+    Status releaseAudio();
+    ProcessResult process(AudioBlockView, EventBlockView, const TransportSnapshot&) noexcept;
+    ProcessResult process(DoubleAudioBlockView, EventBlockView, const TransportSnapshot&) noexcept;
+    uint32_t latencySamples() const noexcept;
+    void resetProcessing() noexcept;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;

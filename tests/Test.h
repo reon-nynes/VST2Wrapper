@@ -7,6 +7,8 @@
 
 struct TestCase { std::string name; std::function<void()> run; };
 std::vector<TestCase>& testCases();
+extern thread_local bool countAllocations;
+extern thread_local size_t allocationCount;
 struct RegisterTest
 {
     RegisterTest(const char* name, std::function<void()> run) { testCases().push_back({name, std::move(run)}); }

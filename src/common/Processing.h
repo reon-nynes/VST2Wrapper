@@ -16,4 +16,38 @@ struct HostNotification
     int64_t value = 0;
     float normalized = 0;
 };
+struct TransportSnapshot
+{
+    uint32_t flags = 0;
+    uint32_t processFlags = 0;
+    int64_t projectSamples = 0;
+    int64_t streamSamples = 0;
+    double ppq = 0, tempo = 120, barStart = 0, cycleStart = 0, cycleEnd = 0;
+    int32_t numerator = 4, denominator = 4;
+};
+static_assert(sizeof(TransportSnapshot) == 72);
+struct AudioBlockView
+{
+    std::span<const float* const> inputs;
+    std::span<float* const> outputs;
+    uint32_t samples = 0;
+};
+struct DoubleAudioBlockView
+{
+    std::span<const double* const> inputs;
+    std::span<double* const> outputs;
+    uint32_t samples = 0;
+};
+struct MidiEvent
+{
+    int64_t sample = 0;
+    std::span<const std::byte> data;
+};
+struct EventBlockView
+{
+    std::span<const MidiEvent> input;
+    void* context = nullptr;
+    void (*emit)(void*, int64_t sample, std::span<const std::byte>) = nullptr;
+};
+enum class ProcessResult { rendered, priming, underrun, failed };
 }

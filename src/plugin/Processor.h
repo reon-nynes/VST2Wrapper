@@ -11,9 +11,14 @@ public:
     Processor();
     ~Processor() override;
     const juce::String getName() const override { return juce::String::fromUTF8(moduleDisplayName()); }
-    void prepareToPlay(double, int) override {}
-    void releaseResources() override {}
+    void prepareToPlay(double, int) override;
+    void releaseResources() override;
+    void reset() override { client.resetProcessing(); }
     void processBlock(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlock(juce::AudioBuffer<double>&, juce::MidiBuffer&) override;
+    void processBlockBypassed(juce::AudioBuffer<float>&, juce::MidiBuffer&) override;
+    void processBlockBypassed(juce::AudioBuffer<double>&, juce::MidiBuffer&) override;
+    bool supportsDoublePrecisionProcessing() const override { return true; }
     bool isBusesLayoutSupported(const BusesLayout&) const override;
     bool hasEditor() const override { return moduleBinding().hasEditor; }
     juce::AudioProcessorEditor* createEditor() override;
@@ -31,8 +36,14 @@ public:
     BridgeClient& bridge() { return client; }
 private:
     static BusesProperties makeBuses();
+    template<class Sample> void processBuffer(juce::AudioBuffer<Sample>&, juce::MidiBuffer&, bool bypass = false);
+    TransportSnapshot transportSnapshot() const;
     std::unique_ptr<struct ExtractedPayload> payload;
     BridgeClient client;
     std::mutex startupMutex;
+    std::vector<MidiEvent> inputMidi;
+    juce::MidiBuffer outputMidi;
+    int64_t processingPosition = 0;
+    bool audioReady = false;
 };
 }
