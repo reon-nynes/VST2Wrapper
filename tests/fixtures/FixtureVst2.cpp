@@ -19,6 +19,11 @@ struct Instance
 
 extern "C" __declspec(dllexport) void FixtureConfigure(uint32_t flags) { options = flags; counters = {}; }
 extern "C" __declspec(dllexport) FixtureCounters FixtureStats() { return counters; }
+static intptr_t copyText(void* destination, const char* text)
+{
+    std::memcpy(destination, text, std::strlen(text) + 1);
+    return 1;
+}
 
 static intptr_t __cdecl control(vst_effect_t* effect, int32_t opcode, int32_t index, intptr_t, void* pointer, float)
 {
@@ -27,11 +32,11 @@ static intptr_t __cdecl control(vst_effect_t* effect, int32_t opcode, int32_t in
     {
         case VST_EFFECT_OPCODE_CREATE: ++counters.opens; return 1;
         case VST_EFFECT_OPCODE_DESTROY: ++counters.closes; delete &instance; return 1;
-        case VST_EFFECT_OPCODE_EFFECT_NAME: std::strcpy(static_cast<char*>(pointer), "Nytera Fixture"); return 1;
-        case VST_EFFECT_OPCODE_VENDOR_NAME: std::strcpy(static_cast<char*>(pointer), "Nytera"); return 1;
-        case VST_EFFECT_OPCODE_PARAM_NAME: std::strcpy(static_cast<char*>(pointer), index == 0 ? "Gain" : "Mode"); return 1;
-        case VST_EFFECT_OPCODE_PARAM_LABEL: std::strcpy(static_cast<char*>(pointer), ""); return 1;
-        case VST_EFFECT_OPCODE_PARAM_VALUE: std::strcpy(static_cast<char*>(pointer), "0.5"); return 1;
+        case VST_EFFECT_OPCODE_EFFECT_NAME: return copyText(pointer, "Nytera Fixture");
+        case VST_EFFECT_OPCODE_VENDOR_NAME: return copyText(pointer, "Nytera");
+        case VST_EFFECT_OPCODE_PARAM_NAME: return copyText(pointer, index == 0 ? "Gain" : "Mode");
+        case VST_EFFECT_OPCODE_PARAM_LABEL: return copyText(pointer, "");
+        case VST_EFFECT_OPCODE_PARAM_VALUE: return copyText(pointer, "0.5");
         case VST_EFFECT_OPCODE_PARAM_IS_AUTOMATABLE: return 1;
         case VST_EFFECT_OPCODE_CATEGORY: return (instance.flags & 2) ? VST_EFFECT_CATEGORY_CONTAINER : 1;
         case VST_EFFECT_OPCODE_EDITOR_GET_RECT: *static_cast<vst_rect_t**>(pointer) = &instance.rectangle; return 1;
@@ -66,7 +71,7 @@ extern "C" __declspec(dllexport) vst_effect_t* VSTPluginMain(CanonicalHost host)
     instance->host = host;
     instance->flags = options;
     auto& effect = instance->effect;
-    effect.magic_number = (options & 4) ? 0 : VST_FOURCC('V', 's', 't', 'P');
+    effect.magic_number = (options & 4) || !counters.earlyCallbackOk ? 0 : VST_FOURCC('V', 's', 't', 'P');
     effect.control = control;
     effect.process_float = process;
     effect.set_parameter = setParameter;

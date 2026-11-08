@@ -1,28 +1,13 @@
 #pragma once
 #include "common/Manifest.h"
 #include "common/Vst2.h"
+#include "common/Processing.h"
 #include <windows.h>
 #include <memory>
 #include <functional>
 
 namespace nytera
 {
-struct ProcessConfig
-{
-    double sampleRate = 44100;
-    uint32_t maximumBlock = 512;
-    uint32_t inputs = 2, outputs = 2;
-    bool offline = false;
-};
-
-struct HostNotification
-{
-    uint32_t opcode = 0;
-    int32_t index = 0;
-    intptr_t value = 0;
-    float normalized = 0;
-};
-
 class Vst2Instance
 {
 public:

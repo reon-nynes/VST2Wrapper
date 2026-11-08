@@ -1,10 +1,17 @@
 #include "Vst2Instance.h"
+#include "Server.h"
 #include <iostream>
 #include <objbase.h>
 int wmain(int argc, wchar_t** argv)
 {
     CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
     int result = 1;
+    if (argc == 4 && std::wstring(argv[1]) == L"--serve")
+    {
+        result = nytera::runHelperServer(argv[2], nytera::pathUtf8(std::filesystem::path(argv[3])));
+        CoUninitialize();
+        return result;
+    }
     if (argc == 5 && std::wstring(argv[1]) == L"--inspect" && std::wstring(argv[3]) == L"--output")
     {
         auto instance = nytera::Vst2Instance::open(argv[2]);
