@@ -27,6 +27,10 @@ try {
     try {
         foreach ($dependency in @('JUCE', 'vst2sdk')) {
             $root = Join-Path $workspace "out/deps/$dependency"
+            foreach ($directory in Get-ChildItem -LiteralPath $root -Directory -Recurse -Force) {
+                $relative = [IO.Path]::GetRelativePath($workspace, $directory.FullName).Replace('\', '/')
+                [void]$archive.CreateEntry($prefix + $relative + '/')
+            }
             foreach ($file in Get-ChildItem -LiteralPath $root -File -Recurse -Force) {
                 $relative = [IO.Path]::GetRelativePath($workspace, $file.FullName).Replace('\', '/')
                 [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive, $file.FullName, $prefix + $relative, [IO.Compression.CompressionLevel]::Optimal)
