@@ -2,3 +2,4 @@
 *.dll binary
 *.exe binary
 *.vst3 binary
+*.patch -text

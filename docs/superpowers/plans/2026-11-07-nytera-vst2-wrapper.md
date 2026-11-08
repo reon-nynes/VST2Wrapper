@@ -148,7 +148,7 @@ Produces `Status BridgeClient::start(const Manifest&, const std::filesystem::pat
 - [ ] Add failing `Control.CrossBitness`, `Control.VersionMismatch`, `Control.PartialFrame`, `Control.StartupCallback`, and `Control.ParallelInstances` tests. Assert x64-to-x86 communication, explicit version rejection, bounded length decoding, callback ordering, and independent instance IDs.
 - [ ] Implement a version-1 little-endian frame header with magic, protocol version, opcode, request ID, and payload length. Set explicit opcode-specific size limits. Serialize control requests on a non-audio thread.
 - [ ] Create per-instance named pipes with restricted access, unpredictable endpoint names, and a launch token. Start helpers hidden with explicit executable paths and quoted arguments. Inherit only explicitly required handles, and use a job object to terminate instance-owned children after owner teardown.
-- [ ] Use a 15-second startup deadline, 10-second state deadline, and 2-second graceful shutdown deadline. Notifications complete outside a synchronous request cycle. Startup callbacks obtain locally cached supported answers.
+- [ ] Use a 60-second startup deadline, 10-second state deadline, and 2-second graceful shutdown deadline. Notifications complete outside a synchronous request cycle. Startup callbacks obtain locally cached supported answers.
 - [ ] Run `ctest --test-dir out/build/x64 -C Debug -R Control --output-on-failure`. Verify no orphan helper remains after each successful or failed case.
 - [ ] Commit the cross-architecture control deliverable.
 
