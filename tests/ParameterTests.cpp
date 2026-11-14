@@ -319,6 +319,51 @@ static void parameterThroughVst3(bool captureDuringEdit)
     if (captureDuringEdit) CHECK(captured);
 }
 TEST("Parameter.Vst3Entry") { parameterThroughVst3(false); }
+TEST("Parameter.EditorTracking")
+{
+    auto folder = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/parameter-tests" / std::to_string(GetCurrentProcessId());
+    std::filesystem::create_directories(folder);
+    auto instance = require(Vst2Instance::open(NYTERA_FIXTURE));
+    auto manifest = require(instance->inspect());
+    auto helper = std::filesystem::path(NYTERA_SOURCE_ROOT) / "out/build/x64/" NYTERA_TEST_CONFIG "/NyteraBridge.exe";
+    auto path = folder / "Tracking.vst3";
+    require(writePackage({manifest, NYTERA_EFFECT_TEMPLATE, helper, NYTERA_FIXTURE, {}}, path));
+    ParameterPlugin plugin(path);
+    plugin.openEditor();
+    HWND original = nullptr;
+    EnumChildWindows(plugin.window, [](HWND window, LPARAM context) -> BOOL
+    {
+        wchar_t name[128] {}; GetClassNameW(window, name, 128);
+        if (std::wstring(name) == L"NyteraFixtureEditor") *reinterpret_cast<HWND*>(context) = window;
+        return TRUE;
+    }, reinterpret_cast<LPARAM>(&original));
+    CHECK(original);
+    struct EndTracking { HWND window; ~EndTracking() { RemovePropW(window, L"NyteraFixtureTracking"); } } endTracking {original};
+    CHECK(PostMessageW(original, WM_COMMAND, 115, 0));
+    pumpMessages();
+    CHECK(GetPropW(original, L"NyteraFixtureTracking"));
+    CHECK(plugin.handler.begins == 1 && plugin.handler.ends == 0);
+    auto id = manifest.parameters[0].vst3Id;
+    for (double value : {0.75, 0.25})
+    {
+        CHECK(PostMessageW(original, WM_COMMAND, 116, 0));
+        pumpMessages();
+        CHECK(GetPropW(original, L"NyteraFixtureTracking"));
+        CHECK(plugin.controller->getParamNormalized(id) == value);
+        CHECK(!plugin.handler.values.empty());
+        CHECK(plugin.handler.values.back().first == id && plugin.handler.values.back().second == value);
+        CHECK(plugin.handler.begins == 1 && plugin.handler.ends == 0);
+    }
+    CHECK(plugin.controller->setParamNormalized(id, 0.6) == kResultOk);
+    pumpMessages();
+    String128 display {};
+    CHECK(plugin.controller->getParamStringByValue(id, 0.6, display) == kResultOk);
+    CHECK(std::u16string(reinterpret_cast<const char16_t*>(display)) == u"0.60");
+    CHECK(GetPropW(original, L"NyteraFixtureTracking"));
+    RemovePropW(original, L"NyteraFixtureTracking");
+    pumpMessages();
+    CHECK(plugin.handler.begins == 1 && plugin.handler.ends == 1);
+}
 TEST("State.ReentrantSnapshot") { parameterThroughVst3(true); }
 static void stateThroughVst3(bool programs)
 {

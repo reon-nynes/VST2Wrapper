@@ -78,14 +78,14 @@ Core code is organized under `src/common`, `src/bridge`, `src/helper`, `src/pack
 The Windows release workflow runs when a `v*` tag is pushed or a GitHub release is published. It builds the x64 generator and templates plus both helper architectures on Windows Server 2022, runs the native test suites, and attaches the Windows ZIP, matching source ZIP and SHA-256 checksums to the tagged release. A manual workflow run on a branch uploads build artifacts for verification.
 
 ```powershell
-git tag v0.1.0
-git push origin v0.1.0
+git tag v0.2.0
+git push origin v0.2.0
 ```
 
 The Windows ZIP contains the staged application and runtime assets. The source ZIP includes the tagged project, patched JUCE sources, the pinned VST2 SDK and dependency Git metadata for an offline dependency rebuild. Build it with the same `scripts/Build.ps1` command. Packaging can also run locally after committing the source and building Release.
 
 ```powershell
-pwsh -File scripts/Package.ps1 -Version v0.1.0
+pwsh -File scripts/Package.ps1 -Version v0.2.0
 ```
 
 ## License

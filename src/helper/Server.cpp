@@ -20,12 +20,13 @@ public:
     ~HelperServer()
     {
         audio.reset();
-        if (instance) instance->onNotification = {};
+        if (instance) { instance->onNotification = {}; instance->onIdle = {}; }
         editor.reset();
         instance.reset();
     }
     int run()
     {
+        mainThread = GetCurrentThreadId();
         while (running)
         {
             auto now = std::chrono::steady_clock::now();
@@ -43,18 +44,48 @@ public:
                 TranslateMessage(&message);
                 DispatchMessageW(&message);
             }
-            auto available = channel.available();
-            if (std::holds_alternative<Failure>(available)) return 1;
-            if (!std::get<bool>(available)) { std::this_thread::sleep_for(std::chrono::milliseconds(2)); continue; }
-            auto incoming = channel.receive(std::chrono::seconds(10));
-            if (std::holds_alternative<Failure>(incoming)) return 1;
-            auto response = handle(std::get<Frame>(std::move(incoming)));
-            auto sent = channel.send(response, std::chrono::seconds(10));
-            if (std::holds_alternative<Failure>(sent)) return 1;
+            serviceRequest(false);
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
         }
-        return 0;
+        return exitCode;
     }
 private:
+    void serviceRequest(bool nested)
+    {
+        if (!running || handlingRequest || (nested && deferredRequest)) return;
+        handlingRequest = true;
+        struct Finish { bool& active; ~Finish() { active = false; } } finish {handlingRequest};
+        if (!deferredRequest)
+        {
+            auto available = channel.available();
+            if (std::holds_alternative<Failure>(available)) { running = false; exitCode = 1; return; }
+            if (!std::get<bool>(available)) return;
+            auto incoming = channel.receive(std::chrono::seconds(10));
+            if (std::holds_alternative<Failure>(incoming)) { running = false; exitCode = 1; return; }
+            deferredRequest = std::get<Frame>(std::move(incoming));
+        }
+        if (nested)
+        {
+            switch (deferredRequest->command)
+            {
+                case ControlCommand::inspect:
+                case ControlCommand::poll:
+                case ControlCommand::parameter:
+                case ControlCommand::display:
+                case ControlCommand::programs:
+                case ControlCommand::captureState:
+                    break;
+                // In particular, never close/recreate an editor while its mouse
+                // handler is still on the stack. Serve these after it returns.
+                default: return;
+            }
+        }
+        auto request = std::move(*deferredRequest);
+        deferredRequest.reset();
+        auto response = handle(std::move(request));
+        auto sent = channel.send(response, std::chrono::seconds(10));
+        if (std::holds_alternative<Failure>(sent)) { running = false; exitCode = 1; }
+    }
     void postNotification(HostNotification event)
     {
         if (event.opcode == VST_HOST_OPCODE_EDITOR_RESIZE && event.index > 0 && event.value > 0)
@@ -116,6 +147,12 @@ private:
                 closedGestures.resize(actual.parameters.size());
                 publishedGestures.resize(actual.parameters.size());
                 instance->onNotification = [this](const HostNotification& event) { postNotification(event); };
+                instance->onIdle = [this]
+                {
+                    // Old editors run their own modal tracking loop. They yield
+                    // through audioMasterIdle instead of returning to run().
+                    if (GetCurrentThreadId() == mainThread) serviceRequest(true);
+                };
                 response.payload = encodeManifest(actual);
                 return response;
             }
@@ -344,6 +381,10 @@ private:
     std::mutex sourceMutex;
     Manifest expected, actual;
     bool running = true;
+    bool handlingRequest = false;
+    DWORD mainThread = 0;
+    int exitCode = 0;
+    std::optional<Frame> deferredRequest;
     std::unique_ptr<BoundedQueue<HostNotification, 8192>> notifications = std::make_unique<BoundedQueue<HostNotification, 8192>>();
     std::atomic<bool> notificationOverflow {false};
     std::unique_ptr<std::atomic<uint64_t>[]> activeGestures;

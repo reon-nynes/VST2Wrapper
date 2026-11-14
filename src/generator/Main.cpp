@@ -3,7 +3,7 @@ class NyteraApplication final : public juce::JUCEApplication
 {
 public:
     const juce::String getApplicationName() override { return "Nytera VST2 Wrapper"; }
-    const juce::String getApplicationVersion() override { return "0.1.0"; }
+    const juce::String getApplicationVersion() override { return "0.2.0"; }
     void initialise(const juce::String&) override
     {
         window = std::make_unique<Window>(getCommandLineParameterArray());

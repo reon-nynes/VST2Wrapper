@@ -399,6 +399,9 @@ intptr_t Vst2Instance::hostCall(int32_t opcode, int32_t index, intptr_t value, v
 {
     switch (opcode)
     {
+        case VST_HOST_OPCODE_KEEPALIVE_OR_IDLE:
+            if (onIdle) onIdle();
+            return 0;
         case 7:
         {
             thread_local Vst2TimeInfo time;

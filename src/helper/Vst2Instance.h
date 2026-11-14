@@ -36,6 +36,7 @@ public:
     intptr_t dispatch(int32_t opcode, int32_t index = 0, intptr_t value = 0, void* pointer = nullptr, float real = 0);
     vst_effect_t* native() const { return effect; }
     std::function<void(const HostNotification&)> onNotification;
+    std::function<void()> onIdle;
 private:
     Vst2Instance() = default;
     static intptr_t VST_FUNCTION_INTERFACE host(vst_effect_t*, int32_t, int32_t, intptr_t, void*, float);

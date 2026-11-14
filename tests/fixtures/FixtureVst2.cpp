@@ -132,6 +132,35 @@ static LRESULT CALLBACK editorProcedure(HWND window, UINT message, WPARAM wParam
         instance->resetEditor = true;
         return 0;
     }
+    if (instance && message == WM_COMMAND && LOWORD(wParam) == 115)
+    {
+        // Legacy editors keep their mouse handler on the stack throughout a drag
+        // and call audioMasterIdle to let the host continue servicing requests.
+        SetPropW(window, L"NyteraFixtureTracking", reinterpret_cast<HANDLE>(1));
+        instance->host(&instance->effect, 43, 0, 0, nullptr, 0);
+        const auto end = GetTickCount64() + 3000;
+        while (GetPropW(window, L"NyteraFixtureTracking") && GetTickCount64() < end)
+        {
+            instance->host(&instance->effect, VST_HOST_OPCODE_KEEPALIVE_OR_IDLE, 0, 0, nullptr, 0);
+            MSG nested;
+            while (PeekMessageW(&nested, nullptr, 0, 0, PM_REMOVE))
+            {
+                TranslateMessage(&nested);
+                DispatchMessageW(&nested);
+            }
+            Sleep(1);
+        }
+        RemovePropW(window, L"NyteraFixtureTracking");
+        instance->host(&instance->effect, 44, 0, 0, nullptr, 0);
+        return 0;
+    }
+    if (instance && message == WM_COMMAND && LOWORD(wParam) == 116)
+    {
+        instance->gain = instance->gain == 0.75f ? 0.25f : 0.75f;
+        instance->programGains[instance->currentProgram.load()] = instance->gain.load();
+        instance->host(&instance->effect, 0, 0, 0, nullptr, instance->gain.load());
+        return 0;
+    }
     if (instance && message == WM_PAINT)
     {
         PAINTSTRUCT paint;

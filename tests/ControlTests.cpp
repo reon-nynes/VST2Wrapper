@@ -2,6 +2,7 @@
 #include "bridge/BridgeClient.h"
 #include "Test.h"
 #include <windows.h>
+#include <thread>
 using namespace nytera;
 static std::filesystem::path assets(const char* architecture, const char* filename)
 {
@@ -69,4 +70,77 @@ TEST("Control.ParallelInstances")
     CHECK(a.endpoint() != b.endpoint());
     a.stop();
     CHECK(require(decodeManifest(require(b.request(ControlCommand::inspect)))).sourceUniqueId == 0x4e795431);
+}
+TEST("Control.EditorTracking")
+{
+    for (bool x86 : {false, true})
+    {
+        auto architecture = x86 ? "x86" : "x64";
+        auto source = assets(architecture, "NyteraFixture.dll");
+        BridgeClient client;
+        require(client.start(fixtureBinding(source, x86 ? Architecture::x86 : Architecture::x64), assets(architecture, "NyteraBridge.exe"), source));
+        require(client.prepare({48000, 64, 2, 2, false}));
+        auto parent = CreateWindowExW(0, L"STATIC", L"", WS_POPUP, 0, 0, 640, 480, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
+        CHECK(parent);
+        struct WindowCleanup { HWND window; ~WindowCleanup() { DestroyWindow(window); } } cleanup {parent};
+        require(client.openEditor(reinterpret_cast<uint64_t>(parent)));
+        auto original = GetWindow(GetWindow(parent, GW_CHILD), GW_CHILD);
+        CHECK(original);
+        struct EndTracking { HWND window; ~EndTracking() { RemovePropW(window, L"NyteraFixtureTracking"); } } endTracking {original};
+        CHECK(PostMessageW(original, WM_COMMAND, 115, 0));
+        auto deadline = GetTickCount64() + 2000;
+        while (!GetPropW(original, L"NyteraFixtureTracking") && GetTickCount64() < deadline)
+        {
+            MSG message;
+            PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
+            Sleep(1);
+        }
+        CHECK(GetPropW(original, L"NyteraFixtureTracking"));
+        // This is the same notification request that used to fail during D82 drags.
+        require(client.request(ControlCommand::poll, {}, std::chrono::milliseconds(200)));
+        CHECK(GetPropW(original, L"NyteraFixtureTracking"));
+        CHECK(require(client.parameterDisplay(0)).text == "0.50");
+        CHECK(PostMessageW(original, WM_COMMAND, 116, 0));
+        bool synchronized = false;
+        deadline = GetTickCount64() + 500;
+        while (!synchronized && GetTickCount64() < deadline)
+            for (const auto& event : require(client.takeNotifications()))
+                if (event.opcode == 0 && event.index == 0 && event.normalized == 0.75f) synchronized = true;
+        CHECK(synchronized && GetPropW(original, L"NyteraFixtureTracking"));
+        CHECK(require(client.parameterValues())[0] == 0.75f);
+        // Host automation must still reach the source inside the tracking loop.
+        client.enqueueParameter({0, 0, 0.5f, 1});
+        require(client.flushParameters());
+        CHECK(require(client.parameterValues())[0] == 0.5f);
+        std::array<float, 64> input, left, right;
+        input.fill(0.8f);
+        std::array<const float*, 2> inputs {input.data(), input.data()};
+        std::array<float*, 2> outputs {left.data(), right.data()};
+        for (int block = 0; block < 10; ++block)
+        {
+            TransportSnapshot transport; transport.projectSamples = block * 64; transport.flags = 2;
+            CHECK(client.process(AudioBlockView{inputs, outputs, 64}, {}, transport) == ProcessResult::rendered);
+            CHECK(left[0] == 0.4f && right[0] == 0.4f);
+            require(client.takeNotifications());
+        }
+        // Closing must wait for the tracking handler to return, rather than
+        // destroying its editor reentrantly from audioMasterIdle.
+        std::atomic<bool> closed {false};
+        std::jthread closer([&] { client.closeEditor(); closed = true; });
+        Sleep(30);
+        const bool stillTracking = GetPropW(original, L"NyteraFixtureTracking") && !closed.load();
+        RemovePropW(original, L"NyteraFixtureTracking");
+        // Destroying a cross-process child synchronously notifies this parent.
+        // Keep its owner thread responsive while the close request completes.
+        deadline = GetTickCount64() + 2500;
+        while (!closed.load() && GetTickCount64() < deadline)
+        {
+            MSG message;
+            PeekMessageW(&message, nullptr, 0, 0, PM_NOREMOVE);
+            Sleep(1);
+        }
+        closer.join();
+        CHECK(stillTracking && closed.load());
+        CHECK(client.status().phase == BridgePhase::ready);
+    }
 }
